@@ -1,0 +1,124 @@
+# Example-based unit tests for the template module — DECLARATIVE SPEC FORM.
+#
+# The spec-format sibling of `test/template_unit_test.aql`. Each check is
+# a `TestSpec` value `{name, subject, cases, subs}` that `Test.run-spec`
+# walks and dispatches:
+#   - `subject` is the word to exercise, as a dotted String
+#     ("Template.render"); the runner resolves and dispatches it.
+#   - each case is `{name, in, out}`: `in` is spread onto the stack
+#     (deepest first), the subject is dispatched, and the top result is
+#     deep-compared (deq) against `out`.
+#
+# The one-shot `Template.render` ({engine, source, context} → String) is
+# the natural subject: a single options map in, a String out.
+#
+# Run:
+#   aql test/template_unit_spec.aql
+
+
+import "aql:test"
+import "./template.aql"
+
+
+def specs [
+
+  # interpolation: escaped by default, raw for triple/ampersand.
+  {
+    name:    "interpolation"
+    subject: "Template.render"
+    cases: [
+      {
+        name: "escaped-var"
+        in:   [ {engine:'mustache' source:'Hi {{name}}!' context:{name:'Ada'}} ]
+        out:  "Hi Ada!"
+      }
+      {
+        name: "html-escaped"
+        in:   [ {engine:'mustache' source:'{{h}}' context:{h:'<b>&"'}} ]
+        out:  "&lt;b&gt;&amp;&quot;"
+      }
+      {
+        name: "unescaped-triple"
+        in:   [ {engine:'mustache' source:'{{{h}}}' context:{h:'<b>'}} ]
+        out:  "<b>"
+      }
+      {
+        name: "missing-is-empty"
+        in:   [ {engine:'mustache' source:'a-{{x}}b' context:{}} ]
+        out:  "a-b"
+      }
+    ]
+    subs: []
+  }
+
+  # dotted lookup walks nested maps.
+  {
+    name:    "dotted-lookup"
+    subject: "Template.render"
+    cases: [
+      {
+        name: "two-levels"
+        in:   [ {engine:'mustache' source:'{{a.b}}' context:{a:{b:'deep'}}} ]
+        out:  "deep"
+      }
+    ]
+    subs: []
+  }
+
+  # sections: list iteration, object context, inverted complement.
+  {
+    name:    "sections"
+    subject: "Template.render"
+    cases: [
+      {
+        name: "list-iteration"
+        in:   [ {engine:'mustache' source:'{{#xs}}[{{.}}]{{/xs}}' context:{xs:['a' 'b']}} ]
+        out:  "[a][b]"
+      }
+      {
+        name: "object-context"
+        in:   [ {engine:'mustache' source:'{{#u}}{{name}}{{/u}}' context:{u:{name:'Ada'}}} ]
+        out:  "Ada"
+      }
+      {
+        name: "inverted-empty"
+        in:   [ {engine:'mustache' source:'{{^xs}}none{{/xs}}' context:{xs:[]}} ]
+        out:  "none"
+      }
+    ]
+    subs: []
+  }
+
+  # comments render nothing.
+  {
+    name:    "comments"
+    subject: "Template.render"
+    cases: [
+      {
+        name: "comment-dropped"
+        in:   [ {engine:'mustache' source:'a{{! note }}b' context:{}} ]
+        out:  "ab"
+      }
+    ]
+    subs: []
+  }
+
+]
+
+
+# --- run every spec ------------------------------------------------
+
+def _ (specs each [
+  var [[s]
+    s Test.run-spec end
+    0
+  ]
+])
+
+
+# --- summary -------------------------------------------------------
+
+print ("---")
+print (`fail count: ${(Test.fail-count)}`)
+0 (Test.fail-count) Assert.equal end
+print ("all green")

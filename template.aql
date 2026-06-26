@@ -1,0 +1,361 @@
+# template: sandboxed templating languages in AQL.
+#
+# Public surface (the Template namespace exported at the bottom):
+#
+#   {engine:String, source:String} Template.compile  → Compiled
+#   compiled Template.render context                  → String
+#   {engine, source, context} Template.render         → String  (one-shot)
+#   Template.engines                                  → List    (available engines)
+#
+# A template string is turned into output through a three-stage pipeline,
+# the same for every engine:
+#
+#   1. PARSE   — `aql:parse` defines the template grammar. A custom lex
+#                matcher (the lexer) segments the source into a typed
+#                token stream and a declarative `Parse.rule` recognizes
+#                it, registered as a `parse <engine>` kind.
+#   2. COMPILE — the token stream is lowered to an AQL program: a fixed
+#                runtime prelude of custom `tpl_*` words plus a `__render`
+#                function that builds the output by calling only those
+#                words.
+#   3. RUN     — the program is executed through `aql:vm` in a fresh
+#                sub-engine under a totally restricted policy: every
+#                capability scope (network, fileops, process, env, sqlite)
+#                is uninstalled and only the template runtime is reachable,
+#                with step/time/output limits. A template therefore cannot
+#                perform I/O, escape the sandbox, or run unbounded — the
+#                strongest isolation aql offers.
+#
+# Engines: `mustache` is implemented end-to-end. `handlebars`, `liquid`
+# and `jinja` share this spine (lexer + recognizer + compiler + runtime +
+# sandbox) and are registered as future engines; selecting one today
+# raises `unknown_engine` until its grammar/semantics land.
+#
+# Failures raise coded errors (catch with `do […] error […]`, read
+# `e get code` / `e get message` in the handler):
+#
+#   bad_input        Template.compile/render arguments missing or wrong type
+#   unknown_engine   the requested engine is not implemented
+#   template_syntax  the template is malformed (unterminated or unbalanced tag)
+#
+# Calling convention: the receiver/data comes first, then the verb, then
+# any extra arguments — `compiled Template.render context`. Group a call in
+# parens to use its result as a value.
+#
+# Imported via `import "./template.aql"`; the importing script need not
+# pre-import the `aql:*` modules this file uses (parse, parselang,
+# string-util, vm) — they are imported here.
+
+
+import "aql:parse"
+import "aql:parselang"
+import "aql:string-util"
+import "aql:vm"
+
+
+# --- type -----------------------------------------------------------
+#
+# A compiled template: the engine it was built for plus the AQL program
+# (runtime prelude + `__render` fn) that renders it. `render` appends the
+# per-call context and runs the whole thing in the sandbox. Treat the
+# fields as read-only; build only through `Template.compile`.
+
+def Compiled class {
+  engine:  String
+  program: String
+}
+
+
+# --- sandbox policy -------------------------------------------------
+#
+# The policy handed to `Vm.run-with` for every render. It denies all the
+# coarse capabilities outright (network / fileops / process / env / sqlite
+# are uninstalled, so the words don't even exist in the sub-engine) and
+# allows only `mutate` (the runtime builds output in a local buffer) plus
+# the import of `aql:string-util` (pure string computation the runtime
+# needs — concat / replace / split). Resource limits bound a runaway or
+# hostile template. This is the "totally restricted registry": nothing
+# outside the template runtime vocabulary can be reached.
+
+def tpl-sandbox {
+  version: 1
+  name:    "template"
+  limits: {
+    timeoutMs:      5000
+    maxStepBudget:  5000000
+    maxStackDepth:  1024
+    maxOutputBytes: 8000000
+  }
+  scopes: {
+    global: {
+      words: { default: "deny" rules: [ { allow: ["mutate"] } ] }
+    }
+    engine: { words: { default: "allow" } }
+    modules: {
+      words: {
+        default: "deny"
+        rules: [ { allow: ["import"] where: { module: ["aql:string-util"] } } ]
+      }
+      scopes: {
+        "aql:string-util": { words: { default: "allow" } }
+      }
+    }
+    fileops: { install: false }
+    network: { install: false }
+    sqlite:  { install: false }
+    process: { install: false }
+    env:     { install: false }
+  }
+}
+
+
+# --- runtime prelude ------------------------------------------------
+#
+# The custom secword set the compiled body is built from. Emitted as the
+# head of every program and run inside the sandbox. Every secword is pure
+# (value-returning) — AQL traces a void-return fn body once at definition,
+# so the runtime avoids captured mutation and returns Strings instead.
+#
+#   tpl_str v            stringify (None → "")
+#   tpl_esc v            HTML-escape the stringified value
+#   tpl_truthy v         mustache truthiness (None/false/""/[] are falsy)
+#   tpl_lookup path cx   resolve a dotted name (or "." = current) in cx
+#   tpl_section v cx fn  render a section: iterate a list, recurse into a
+#                        map, render once for a truthy scalar, else ""
+#   tpl_inverted v cx fn render the body once iff v is falsy
+#
+# The quote character for escaping is written `"\""` — inside this
+# backtick string a `\"` stays literal, yielding valid AQL source.
+
+def tpl-runtime `import "aql:string-util"
+def __none None
+def tpl_str fn [ [v:Any] [String] [ if (v is None) [""] [(convert String v)] ] ]
+def tpl_esc fn [ [v:Any] [String] [
+  def s (tpl_str v)
+  def a (StringUtil.replace "&" "&amp;" s {scope:'all'})
+  def b (StringUtil.replace "<" "&lt;" a {scope:'all'})
+  def c (StringUtil.replace ">" "&gt;" b {scope:'all'})
+  StringUtil.replace "\"" "&quot;" c {scope:'all'}
+] ]
+def tpl_truthy fn [ [v:Any] [Boolean] [
+  if (v is None) [false] [
+  if (v is Boolean) [v] [
+  if (v is List) [((v size) gt 0)] [
+  if (v is String) [((v size) gt 0)] [true]]]]
+] ]
+def tpl_lookup fn [ [path:String cx:Any] [Any] [
+  if (path eq ".") [cx] [
+    def segs (StringUtil.split "." path)
+    (cx segs [ var [[seg cur] (if (cur is Map) [(cur get (seg))] [__none]) ] ] fold)
+  ]
+] ]
+def tpl_section fn [ [v:Any cx:Any body:Function] [String] [
+  if (v is List)
+    [ (v each [ var [[it] (body it) ] ]) StringUtil.concat ]
+    [ if (v is Map) [(body v)] [ if (tpl_truthy v) [(body cx)] [""] ] ]
+] ]
+def tpl_inverted fn [ [v:Any cx:Any body:Function] [String] [
+  if (tpl_truthy v) [""] [(body cx)]
+] ]
+`
+
+
+# --- lexer (mustache) -----------------------------------------------
+#
+# `aql:parse` is register-only: a grammar culminates in a `parse <name>`
+# kind. The mustache lexer is a custom `Parse.matcher` (priority 5) that
+# segments the source into typed tokens — text runs and the seven tag
+# kinds — pushing each as a {t,v} map onto `mustache-acc`, and a
+# declarative `Parse.rule` that recognizes the resulting `#TX` stream
+# (push-recursion = "zero or more tokens").
+#
+# Why a matcher and not a pure-ABNF grammar: the structure-first engine's
+# FIRST-set lexer cannot recognize the `{{` delimiter against free text
+# via ABNF character classes — a broad class silently shadows the fixed
+# delimiter token and the tags are never seen (see dx-report.md). A custom
+# matcher gives the lexer the control ABNF cannot here, while the token
+# grammar stays declarative.
+#
+# The accumulator is read back by slicing the span a single parse appended
+# (start..end), so it is re-entrant: a nested compile reads its own span.
+
+def mustache-acc (flex [])
+
+def mustache-grammar Parse.grammar
+
+Parse.matcher mustache-grammar lex 5 ([s:String] => [
+  def two (slice 0 2 s)
+  if (two eq "{{")
+    [ def triple (eq "{{{" (slice 0 3 s))
+      def closer (if triple ["}}}"] ["}}"])
+      def ci (StringUtil.indexof closer s)
+      if (ci lt 0) [ raise template_syntax `unterminated tag near: ${(slice 0 16 s)}` ] []
+      def openlen (if triple [3] [2])
+      def tagbody (slice openlen ci s)
+      def sig (slice 0 1 tagbody)
+      def tail (StringUtil.trim (slice 1 (tagbody size) tagbody))
+      def tok (if triple [{t:'unesc' v:(StringUtil.trim tagbody)}] [
+        if (sig eq "#") [{t:'sec'     v:tail}] [
+        if (sig eq "^") [{t:'inv'     v:tail}] [
+        if (sig eq "/") [{t:'cls'     v:tail}] [
+        if (sig eq ">") [{t:'part'    v:tail}] [
+        if (sig eq "!") [{t:'comment' v:tail}] [
+        if (sig eq "&") [{t:'unesc'   v:tail}] [
+          {t:'var' v:(StringUtil.trim tagbody)} ]]]]]] ])
+      def adv (add ci (closer size))
+      def _ (mustache-acc push tok)
+      {src: (slice 0 adv s) tin:'#TX' val: 'tag'} ]
+    [ def ni (StringUtil.indexof "{{" s)
+      def adv (if (ni lt 0) [(s size)] [ni])
+      def txt (slice 0 adv s)
+      def _ (mustache-acc push {t:'text' v:txt})
+      {src: txt tin:'#TX' val: 'text'} ]
+]) end
+
+Parse.rule mustache-grammar val {
+  open:  [ {s:'#TX' p:'val'} {} ]
+  close: [ {s:'#ZZ'} {} ]
+} end
+
+Parse.register mustache mustache-grammar end
+
+# Lex a source string into its token list (re-entrant via span slicing).
+def lex-mustache fn [ [src:String] [List] [
+  def st (mustache-acc size)
+  def _ (parse mustache src)
+  slice st (mustache-acc size) mustache-acc
+] ]
+
+
+# --- compiler -------------------------------------------------------
+#
+# Lower a token list to an AQL expression that builds the output. The
+# walk is a self-recursive descent over the token list (recursion is
+# sound in aql; only the bound name is unbound inside its own body, which
+# self-reference is not). `compile-seq` returns {code, next}: `code` is a
+# space-separated run of String-valued AQL expressions and `next` is the
+# index just past the run (at the matching `cls`, or the end). A section
+# recurses for its subseq sequence, validates the matching close, then
+# recurses for the remainder — all self-recursion.
+
+# Render a leaf token to one AQL expression. `name` literals are embedded
+# via `canon` so any text (quotes, braces, newlines) round-trips safely.
+def compile-leaf fn [ [kind:String name:String] [String] [
+  if (kind eq "text")    [ canon name ] [
+  if (kind eq "var")     [ StringUtil.concat ["(tpl_esc (tpl_lookup " (canon name) " ctx))"] ] [
+  if (kind eq "unesc")   [ StringUtil.concat ["(tpl_str (tpl_lookup " (canon name) " ctx))"] ] [
+  # comment / partial (partials are a future feature) render nothing
+  `""` ]]]
+] ]
+
+# Wrap an subseq sequence's code in a body fn for a section.
+def compile-body fn [ [innercode:String] [String] [
+  StringUtil.concat ["(fn [ [ctx:Any] [String] [ ([ " innercode " ] StringUtil.concat) ] ])"]
+] ]
+
+def compile-seq fn [ [toks:List i:Integer] [Map] [
+  if (i gte (toks size)) [ do {code:[""] next:[i]} ] [
+    def tok  (toks get (i))
+    def kind (tok get "t")
+    def name (tok get "v")
+    if (kind eq "cls") [ do {code:[""] next:[i]} ] [
+      def is-sec (kind eq "sec")
+      def is-inv (kind eq "inv")
+      if (is-sec or is-inv) [
+        # subseq sequence up to the matching close
+        def subseq    (compile-seq toks (i add 1))
+        def cidx     (subseq get "next")
+        if (cidx gte (toks size))
+          [ raise template_syntax `unclosed section: {{#${name}}}` ] []
+        def closetok (toks get (cidx))
+        if ((closetok get "v") eq name) []
+          [ raise template_syntax `mismatched close: expected {{/${name}}}, got {{/${(closetok get "v")}}}` ]
+        def secword  (if is-inv ["tpl_inverted"] ["tpl_section"])
+        def sexpr (StringUtil.concat
+          ["(" secword " (tpl_lookup " (canon name) " ctx) ctx " (compile-body (subseq get "code")) ")"])
+        def more  (compile-seq toks (cidx add 1))
+        do { code: [(StringUtil.concat [sexpr " " (more get "code")])] next: [(more get "next")] }
+      ] [
+        def expr (compile-leaf kind name)
+        def more (compile-seq toks (i add 1))
+        do { code: [(StringUtil.concat [expr " " (more get "code")])] next: [(more get "next")] }
+      ]
+    ]
+  ]
+] ]
+
+# Lower a full source string to a complete program (runtime + __render).
+def gen-program fn [ [src:String] [String] [
+  def toks (lex-mustache src)
+  def r    (compile-seq toks 0)
+  def cidx (r get "next")
+  if (cidx lt (toks size))
+    [ raise template_syntax `unexpected close tag: {{/${((toks get (cidx)) get "v")}}}` ] []
+  StringUtil.concat [
+    tpl-runtime
+    `
+def __render fn [ [ctx:Any] [String] [ ([ `
+    (r get "code")
+    ` ] StringUtil.concat) ] ]
+`
+  ]
+] ]
+
+
+# --- public API -----------------------------------------------------
+
+# The engines this build can compile. Mustache is implemented; the others
+# are reserved on the shared spine and raise unknown_engine for now.
+def engine-list ["mustache"]
+
+def engine-known fn [ [name:String] [Boolean] [
+  (false engine-list [ var [[e acc] (acc or (e eq name)) ] ] fold)
+] ]
+
+def tpl-compile fn [ [opts:Options] [Compiled] [
+  def engine (opts get "engine")
+  def source (opts get "source")
+  if ((engine is String) not)
+    [ raise bad_input `Template.compile: 'engine' must be a String (got ${engine})` ] []
+  if ((source is String) not)
+    [ raise bad_input `Template.compile: 'source' must be a String (got ${source})` ] []
+  if (engine-known engine) []
+    [ raise unknown_engine `Template.compile: no engine '${engine}'; available: ${engine-list}` ]
+  make Compiled { engine: engine program: (gen-program source) }
+] ]
+
+def tpl-render-compiled fn [ [c:Compiled cdata:Any] [String] [
+  def full (StringUtil.concat [
+    c.program
+    `
+def __ctx `
+    (canon cdata)
+    `
+(__render __ctx)`
+  ])
+  Vm.run-with full tpl-sandbox
+] ]
+
+# One-shot: compile then render. Accepts {engine, source, context}.
+def tpl-render-opts fn [ [opts:Options] [String] [
+  def c (tpl-compile {engine: (opts get "engine") source: (opts get "source")})
+  def cdata (opts get "context")
+  tpl-render-compiled c cdata
+] ]
+
+# `render` dispatches: a Compiled receiver renders against a context; an
+# options map is the one-shot form.
+def tpl-render fn [
+  [cdata:Any c:Compiled] [String] [ tpl-render-compiled c cdata ]
+  [opts:Options]         [String] [ tpl-render-opts opts ]
+]
+
+
+# --- namespace ------------------------------------------------------
+
+export "Template" {
+  Compiled
+  compile: tpl-compile/r
+  render:  tpl-render/r
+  engines: engine-list
+}
