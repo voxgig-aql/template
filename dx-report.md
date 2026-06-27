@@ -126,11 +126,17 @@ instead, so `join: ", "` and `replace: "a", "b"` parse correctly. Pipes
 
 The void-fn def-time trace (§2), per-word argument order (§3), and
 map-literal scoping (§4) each recurred while adding handlebars/liquid/jinja
-— e.g. `args` and `base` are reserved words that must be renamed; result
-maps must use the `do { k:[expr] }` form; recursion is fine but only
-*self*-reference is unbound, so mutual recursion (compile-tagged-seq ↔
+— result maps must use the `do { k:[expr] }` form; recursion is fine but
+only *self*-reference is unbound, so mutual recursion (compile-tagged-seq ↔
 liquid-if/liquid-for) works as long as each fn guards its list indexing so
 the def-time trace short-circuits on empty input.
+
+A surprisingly broad set of short, ordinary-looking names are **reserved
+built-ins** that `def` rejects with `'X' is a built-in word and cannot be
+redefined`. Encountered (and renamed) here: `emit`, `inner`, `base`,
+`word`, `context`, `args`. Others that *look* reserved but are fine:
+`rest`, `then`. There is no obvious pattern — probe with
+`echo 'def NAME 1' | aql /dev/stdin` before settling on a local name.
 
 ---
 
@@ -146,7 +152,7 @@ on `b849948`:
 | **interpret** (`aql`) | ✅ clean | ✅ all 8 green |
 | **`-compile`** (bytecode, silent fallback) | ✅ runs | ✅ all 8 green, output **byte-identical** to interpret |
 | **`aql check`** | ❌ 24 errors, 10 warnings | ⚠️ 0 errors, only `unused_def` warnings |
-| **`-force-compile`** (strict bytecode) | ❌ refuses (`check diagnostics`) | ❌ refuses (`check diagnostics`) |
+| **`-force-compile`** (strict bytecode) | ❌ refuses (`check diagnostics`) | ⚠️ 1 of 8 fully compiles; the rest refuse on code-body words (`each`/`test-test`, "Stage 2") or, for the smoke suite, `check diagnostics` |
 
 **The module is fully interpretable and runs identically under the byte
 compiler, but is not `aql check`-clean and therefore not
@@ -189,15 +195,26 @@ pass by construction. The benign test-suite `unused_def` warnings *can* be
 silenced with the bloom `_`-prefix trick on body-only defs. Treat `aql
 check` as advisory for this module, not gating.
 
-### 12. 🟡 `-force-compile` is gated by `aql check`, so check noise blocks it
+### 12. 🟡 `-force-compile` refuses — for two distinct reasons
 
-`-force-compile` refuses with `force-compile: check diagnostics` — it
-declines whenever the static checker emits error diagnostics, regardless of
-whether the program would actually lower. Because §11's diagnostics are
-false positives, strict compilation is blocked even though `-compile`
-(non-strict) compiles-or-falls-back and runs every suite green. So the
-refusal is a *consequence* of §11, not an independent compiler limitation;
-closing §11 upstream would unblock this too.
+Strict bytecode (`-force-compile`) declines this module, but the per-target
+reasons differ:
+
+- **`template.aql` and the smoke suite → `force-compile: check
+  diagnostics`.** `-force-compile` refuses whenever the static checker
+  emits error diagnostics, regardless of whether the program would lower.
+  Because §11's diagnostics are false positives, this is a *consequence* of
+  §11, not an independent limitation; closing §11 upstream unblocks it.
+- **The assertion suites → `force-compile: code-body word each / test-test
+  (Stage 2)`.** This is a separate, genuine emitter coverage gap: the
+  bytecode backend can't yet fully lower a higher-order code body (the
+  `each`/`fold` block and the `aql:test` harness's `test-test` /
+  `test-check-prop` words), so it refuses rather than guess. `template_prop_test.aql`
+  (whose property bodies avoid the triggering shapes) *does* fully compile —
+  1 of 8. The same class of refusal is catalogued for the bloom module.
+
+Neither blocks anything in practice: non-strict `-compile` lowers what it
+can and falls back for the rest, byte-identically (§13).
 
 ### 13. ✅ Soundness holds: `-compile` is byte-identical to the interpreter
 
@@ -209,9 +226,36 @@ renders (liquid `for`+filter+`forloop.last`, jinja `if`, handlebars
 contract is upheld for this module — the compile path is safe to use even
 though strict `-force-compile` is blocked by §11/§12.
 
----
+### 14. 🟡 `convert String` requires a Scalar — it raises on a Map/List
 
-## Summary
+`convert String {a:1}` raises `signature_error` (the signatures are
+`(Scalar, Scalar)` etc.; there is no Map→String conversion). This surfaced
+as a render-time error when a value resolved to a Map and was handed to
+`tpl_str` — e.g. a `{{.}}`/`{{this}}` that pointed at the whole context
+frame instead of the intended item.
+
+**Workaround:** stringify only scalars; the runtime's `tpl_str` guards
+`None` and relies on every interpolated value being a scalar by the time it
+reaches `convert`. The fix for the `{{this}}` case was a lookup-model
+correction (resolve `this` to the item, not the frame), not a `convert`
+change.
+
+### 15. 🟡 `aql:parse` builder words are void and silently no-op without a terminator
+
+`Parse.matcher` / `Parse.rule` / `Parse.register` (and the rest of the
+builder) **return nothing**, so they cannot be `def`-bound
+(`def x (Parse.register …)` → "expression produced no value"). Worse, a
+bare builder call followed by more tokens **silently fails to take effect**
+with no error: `Parse.register op g` immediately before another statement
+left `op` *unregistered* — `ParseLang.kinds` simply omitted it, and the
+later `parse op …` failed with "no parser op is registered". Adding the
+`end` terminator (`Parse.register op g end`) fixed it.
+
+**Workaround:** call every `aql:parse` builder word as a bare statement
+terminated with `end` (or as the last statement in its block). This is the
+general forward-collection rule (a verb swallows following tokens), but it
+is especially sharp here because the failure is silent — registration just
+doesn't happen.
 
 | # | Severity | Issue |
 |---|----------|-------|
@@ -226,8 +270,10 @@ though strict `-force-compile` is blocked by §11/§12.
 | 9 | 🟢 | naive comma split breaks quoted filter args; a quote-aware splitter is needed |
 | 10 | 🟢 | the §2/§3/§4 traps recur across the multi-engine layer (reserved words, map-literal scoping, guarded mutual recursion) |
 | 11 | 🟡 | `aql check` reports 24 emergent errors on the module (runtime-registered parsers, dynamic dispatch, emergent paren/unused_def false positives); not gating-ready |
-| 12 | 🟡 | `-force-compile` is gated by `aql check`, so §11's false positives block strict bytecode (non-strict `-compile` is fine) |
+| 12 | 🟡 | `-force-compile` refuses two ways: `check diagnostics` (module/smoke, from §11) and `code-body word each/test-test` (suites, a real emitter coverage gap); 1/8 fully compiles |
 | 13 | ✅ | soundness holds: `-compile` runs every suite green and is byte-identical to the interpreter |
+| 14 | 🟡 | `convert String` requires a Scalar; it raises `signature_error` on a Map/List |
+| 15 | 🟡 | `aql:parse` builder words are void and silently no-op without an `end` terminator (registration just doesn't happen) |
 
 ## Surface status at a glance
 
@@ -235,4 +281,6 @@ though strict `-force-compile` is blocked by §11/§12.
 - **Compile (`-compile`):** ✅ runs; suites green; byte-identical to interpret.
 - **Check (`aql check`):** ❌ module 24 errors / 10 warnings (all checker
   limitations, §11); tests only `unused_def` warnings.
-- **Force-compile (`-force-compile`):** ❌ refuses on check diagnostics (§12).
+- **Force-compile (`-force-compile`):** ❌ module/smoke refuse on `check
+  diagnostics`; the suites refuse on code-body words (`each`/`test-test`);
+  1 of 8 fully compiles (§12).
