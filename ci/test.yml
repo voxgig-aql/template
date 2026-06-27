@@ -1,6 +1,6 @@
 name: tests
 
-# The bloom-filter module is written in AQL, so CI has to build the
+# The template module is written in AQL, so CI has to build the
 # `aql` interpreter from source before it can run anything. The
 # language has no tagged release yet and has shipped breaking changes
 # between commits, so we pin AQL_REF to the exact commit this module is
@@ -18,16 +18,16 @@ on:
   workflow_dispatch:
 
 env:
-  # aql-lang/aql @ main, 2026-06-24 (PR #182, claude/aql-client-issues-6b8new).
-  # Pinned to the exact commit this module is verified against — the build
-  # where all five suites interpret, check (0 errors), and compile clean.
-  AQL_REF: 407fedad2ea2b30c3dde2f29cfbe60e55f94db4e
+  # aql-lang/aql @ latest main. Pinned to the exact commit this module is
+  # verified against — the build where every suite interprets, checks (0
+  # errors), and compiles byte-identically.
+  AQL_REF: b849948a596ddba5c72faf7fcd7a57b585daa9f0
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out bloom-filter
+      - name: Check out template
         uses: actions/checkout@v4
 
       - name: Set up Go
@@ -73,31 +73,41 @@ jobs:
       # Each suite ends with `0 test.fail-count end assert.equal`, so a
       # failure makes aql exit non-zero and fails the step.
       - name: Unit tests (direct)
-        run: aql test/bloom_unit_test.aql
+        run: aql test/template_unit_test.aql
 
       - name: Unit tests (spec format)
-        run: aql test/bloom_unit_spec.aql
+        run: aql test/template_unit_spec.aql
 
       - name: Property tests (direct)
-        run: aql test/bloom_prop_test.aql
+        run: aql test/template_prop_test.aql
 
       - name: Property tests (spec format)
-        run: aql test/bloom_prop_spec.aql
+        run: aql test/template_prop_spec.aql
 
-      - name: Smoke test
-        run: aql test/bloom_smoke_test.aql
+      - name: Smoke test (all four engines)
+        run: aql test/template_smoke_test.aql
 
-      # Advisory static check — NOT a gate. Checking bloom.aql ALONE still
-      # surfaces false `unused_def`/`no_signature` diagnostics: the library
-      # exports its words by reference (`make-bloom/r`, …) so the checker
-      # treats the export map as a non-use site and analyses each word body
-      # without caller types. (Checked THROUGH a suite — where the words are
-      # called with concrete types — `aql check` is clean; the gating
-      # `divergence` job below asserts exactly that.) Run with `--soft` +
+      - name: Handlebars engine
+        run: aql test/handlebars_unit_test.aql
+
+      - name: Liquid engine
+        run: aql test/liquid_unit_test.aql
+
+      - name: Jinja engine
+        run: aql test/jinja_unit_test.aql
+
+      # Advisory static check — NOT a gate. Checking template.aql ALONE
+      # surfaces false `no_signature`/`unused_def`/parse-not-registered
+      # diagnostics: the engines register their grammars as a RUNTIME side
+      # effect (Parse.register), invisible to the static pass, and dynamic
+      # dispatch/mutual recursion defeat the checker's flow analysis (see
+      # dx-report.md §11). Checked THROUGH a suite — where the words run with
+      # concrete values — `aql check` reports 0 errors; the gating
+      # `divergence` job below asserts exactly that. Run with `--soft` +
       # `continue-on-error` so the diagnostics surface without failing the build.
       - name: Static check (advisory, non-gating)
         continue-on-error: true
-        run: aql check --soft bloom.aql
+        run: aql check --soft template.aql
 
   # Gating three-surface guard: every suite must interpret, `aql check` with
   # zero errors, AND match under the byte compiler (`aql --compile`). run.sh
@@ -107,7 +117,7 @@ jobs:
   divergence:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out bloom-filter
+      - name: Check out template
         uses: actions/checkout@v4
 
       - name: Set up Go
@@ -126,13 +136,13 @@ jobs:
   consistency:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out bloom-filter
+      - name: Check out template
         uses: actions/checkout@v4
 
       - name: SKILL.md copies are in sync
         run: |
-          canonical=.claude/skills/bloom-filter-aql/SKILL.md
-          bundled=plugins/bloom-filter-aql/skills/bloom-filter-aql/SKILL.md
+          canonical=.claude/skills/template-aql/SKILL.md
+          bundled=plugins/template-aql/skills/template-aql/SKILL.md
           if ! diff -u "$canonical" "$bundled"; then
             echo "::error file=$bundled::Plugin skill has drifted from $canonical"
             echo "Fix by copying the canonical skill over the bundled one:"
@@ -144,7 +154,7 @@ jobs:
       - name: JSON manifests are valid
         run: |
           for j in .claude-plugin/marketplace.json \
-                   plugins/bloom-filter-aql/.claude-plugin/plugin.json \
+                   plugins/template-aql/.claude-plugin/plugin.json \
                    api.json; do
             if python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$j"; then
               echo "ok: $j"

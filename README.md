@@ -26,7 +26,8 @@ print ({engine:'liquid' source:'{% for x in xs %}{{ x | upcase }} {% endfor %}' 
 > **Calling this library from an AI coding agent?** Read
 > **[AGENTS.md](AGENTS.md)** first — the exact AQL calling convention,
 > verified idioms, and common mistakes. Claude Code auto-loads it via
-> `CLAUDE.md`.
+> `CLAUDE.md`; a portable skill lives in
+> [`.claude/skills/template-aql`](.claude/skills/template-aql/SKILL.md).
 
 ## How it works
 
@@ -99,13 +100,36 @@ for f in test/*.aql; do aql "$f"; done
 In Claude Code web sessions the SessionStart hook
 (`.claude/hooks/session-start.sh`) builds aql automatically.
 
+## For AI coding agents
+
+Point agents at **[AGENTS.md](AGENTS.md)** — the calling convention,
+per-engine features, verified idioms, and common mistakes. To make that
+guidance available in *another* project that uses this library:
+
+- **Copy the skill** — drop
+  [`.claude/skills/template-aql/`](.claude/skills/template-aql/SKILL.md)
+  into that project's `.claude/skills/` (or `~/.claude/skills/`). It loads
+  on demand whenever `Template` calls appear.
+- **Install the plugin** — this repo is also a plugin marketplace:
+
+  ```
+  /plugin marketplace add voxgig-aql/template
+  /plugin install template-aql@voxgig-aql
+  ```
+
+Inside *this* repo, Claude Code picks it up automatically via `CLAUDE.md`
+(which imports `AGENTS.md`) and the bundled skill.
+
 ## Status
 
-This is the **library + tests first** pass: `template.aql` (all four
-engines) plus the test suites are complete and green against aql
-`b849948`. The Diátaxis docs in `docs/`, the bundled skill/plugin, and the
-CI workflow still describe the bloom-filter template this repo was forked
-from and are pending a rewrite for `Template`.
+The library is complete: `template.aql` (all four engines), the eight test
+suites, the [Diátaxis docs](docs/), the agent guides
+([AGENTS.md](AGENTS.md) / [CLAUDE.md](CLAUDE.md) / the `template-aql` skill
++ plugin / [api.json](api.json)), and the CI workflow ([`ci/test.yml`](ci/test.yml))
+are all current against aql `b849948`. Known scope limits (partials,
+inheritance, custom helpers/filters, parent-context fallback in
+mustache/handlebars sections) are listed in [AGENTS.md](AGENTS.md); the
+interpret/check/compile surface status is in [dx-report.md](dx-report.md).
 
 ## License
 

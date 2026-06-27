@@ -52,8 +52,11 @@ Each engine follows one pipeline (see the header of `template.aql`):
   `dx-report.md` (the `fn`-body def-time trace, mixed argument-order
   conventions, map-literal scoping, and the unenforced `aql:vm` step
   budget).
-- Status: this is the **library + tests first** pass — all four engines
-  implemented and green (mustache unit/prop/spec + smoke, plus a unit
-  suite each for handlebars/liquid/jinja). The full Diátaxis docs, the
-  bundled skill/plugin, and the CI workflow still describe the bloom-filter
-  template and are pending a rewrite for `Template`.
+- All four engines are implemented and green (mustache unit/prop/spec +
+  an all-engines smoke, plus a unit suite each for handlebars/liquid/jinja).
+  The Diátaxis docs (`docs/`), the agent guides (`AGENTS.md`, this file, the
+  `template-aql` skill + bundled plugin, `api.json`), and CI (`ci/test.yml`,
+  the canonical workflow — see `ci/README.md`) are all current for
+  `Template`. The `.github/workflows/test.yml` on `main` is the older
+  bloom-era copy, superseded by `ci/test.yml` (promoting it needs `workflow`
+  token scope).
