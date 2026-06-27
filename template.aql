@@ -625,6 +625,15 @@ def is-stopkw fn [ [kw:String] [Boolean] [
    or ((((kw eq "endunless") or (kw eq "endfor")) or ((kw eq "when") or (kw eq "endcase"))) or (kw eq "endcomment")))
 ] ]
 
+# Forward declarations: compile-tagged-seq (below) is mutually recursive with
+# liquid-if / liquid-for. Declaring their signatures first lets the checker type
+# their results as [Map] regardless of definition order (aql analyses fn bodies at
+# definition time, so a call to a not-yet-defined fn would otherwise degrade to an
+# untyped value). The real definitions further down shadow these; runtime is
+# unaffected (a fn call resolves to the latest definition).
+def liquid-if  fn [ [toks:List i:Integer] [Map] [ {} ] ]
+def liquid-for fn [ [toks:List i:Integer] [Map] [ {} ] ]
+
 def compile-tagged-seq fn [ [toks:List i:Integer] [Map] [
   if (i gte (toks size)) [ do {code:[""] next:[i] stopkw:["end"]} ] [
     def tok  (toks get (i))
