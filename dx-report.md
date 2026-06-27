@@ -159,6 +159,19 @@ compiler, but is not `aql check`-clean and therefore not
 `-force-compile`-able.** The check findings are *not* real defects, and the
 soundness contract holds — see the three findings below.
 
+> **Update (aql `claude/dx-driven-language-improvements`, 2026-06-27):** the
+> §11 `parse: no parser … is registered` category — described above as *"the
+> single biggest blocker to a check-clean result"* — is **FIXED upstream**.
+> `aql:parse`'s `Parse.register` gained a check-mode hook that marks its
+> runtime-registered kind as deferred, so `parse <kind>` in a fn body now
+> resolves during analysis instead of raising. **`aql check template.aql` drops
+> from 24 → 18 errors** (`parse_unknown_lang`: 0). The remaining 18 are the two
+> *acknowledged-checker-limitation* categories: 12 `no_signature` (dynamic
+> dispatch over `Any`-typed values — the gradual-dispatch false positive) and 6
+> `fn_body_error: unmatched parenthesis` (emergent whole-module analysis-state
+> bleed — each body is balanced and checks clean alone). Both are upstream
+> checker work, not module defects; the soundness contract (§13) is unchanged.
+
 ### 11. 🟡 `aql check` reports emergent errors the runtime does not (not gating-ready)
 
 `aql check template.aql` reports 24 errors + 10 warnings, yet the
