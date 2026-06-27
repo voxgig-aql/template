@@ -2,11 +2,14 @@
 
 **Date:** 2026-06-26
 **AQL build under test:** `aql-lang/aql` @ `b849948` (latest `main`).
-**Context:** building the `Template` module (sandboxed templating
-languages) on the bloom-filter template repo. The pipeline relies on
-three facilities — `aql:parse` (grammar), `aql:vm` (sandbox), and `canon`
-(round-trippable source) — plus ordinary string/list words. Every gotcha
-below was reproduced first-hand; the five test suites pass on this build.
+**Context:** building the `Template` module (four sandboxed templating
+languages — mustache, handlebars, liquid, jinja) on the bloom-filter
+template repo. The pipeline relies on three facilities — `aql:parse`
+(grammar), `aql:vm` (sandbox), and `canon` (round-trippable source) — plus
+ordinary string/list words. Every gotcha below was reproduced first-hand;
+all eight test suites pass on the interpreter, and this report also audits
+the module across all three execution surfaces (interpret / check /
+compile) in [§ Execution-surface audit](#execution-surface-audit).
 
 Severity: **🔴 high** (silent wrong results / blocks a use case) ·
 **🟡 medium** (friction, clear workaround) · **🟢 low** (papercut).
@@ -131,6 +134,83 @@ the def-time trace short-circuits on empty input.
 
 ---
 
+## Execution-surface audit
+
+AQL exposes three execution surfaces: the interpreter (`aql X`), the static
+checker (`aql check X`), and the bytecode compiler (`aql -compile X`, with
+`-force-compile` to require it). Status of this module + its eight suites
+on `b849948`:
+
+| Surface | `template.aql` | test suites |
+|---|---|---|
+| **interpret** (`aql`) | ✅ clean | ✅ all 8 green |
+| **`-compile`** (bytecode, silent fallback) | ✅ runs | ✅ all 8 green, output **byte-identical** to interpret |
+| **`aql check`** | ❌ 24 errors, 10 warnings | ⚠️ 0 errors, only `unused_def` warnings |
+| **`-force-compile`** (strict bytecode) | ❌ refuses (`check diagnostics`) | ❌ refuses (`check diagnostics`) |
+
+**The module is fully interpretable and runs identically under the byte
+compiler, but is not `aql check`-clean and therefore not
+`-force-compile`-able.** The check findings are *not* real defects, and the
+soundness contract holds — see the three findings below.
+
+### 11. 🟡 `aql check` reports emergent errors the runtime does not (not gating-ready)
+
+`aql check template.aql` reports 24 errors + 10 warnings, yet the
+interpreter runs the module and all suites cleanly and `-compile` is
+byte-identical (§13). The errors are checker limitations, not bugs —
+proven two ways: (a) the interpreter/compiler disagree with check; (b) a
+function that errors *in the module* checks **clean in isolation**
+(`first-word` alone → `0 error(s)`), so the failures are emergent from
+whole-module analysis, not from the code (the same "emergent, not
+per-construct" behaviour the bloom template's force-compile notes
+describe). The categories:
+
+- **`parse: no parser "mustache"/"liquid"/"jinja" is registered`** (in the
+  `lex-*` fn bodies). The grammars are installed by `Parse.register` — a
+  **runtime** side effect; `aql check` never executes it, so the static
+  pass cannot see the `parse <kind>` the lexer calls. This is intrinsic to
+  the architecture (runtime-registered grammars) and the single biggest
+  blocker to a check-clean result.
+- **`no_signature … assuming best-fit candidate`** — user-fn dispatch
+  (`gen-program`, `compile-tagged-seq`, `lex-*`) and dynamic `get` on
+  `Any`-typed values. Same family as the bloom module's false
+  `no_signature for mul` (dx of `407feda`).
+- **`fn_body_error: unmatched opening/closing parenthesis`** for
+  `first-word` / `after-word` / `compile-operand` / `compile-output` /
+  `parts`. Emergent only: each body is balanced and checks clean alone.
+- **`unused_def`** for body-only defs and the mutually-recursive
+  `liquid-if` / `liquid-for` (the checker's flow analysis doesn't see uses
+  reached only through mutual recursion or inside higher-order code
+  bodies).
+
+**Workaround:** none that makes `template.aql` check-clean without upstream
+changes — the runtime-registered-parser pattern is invisible to a static
+pass by construction. The benign test-suite `unused_def` warnings *can* be
+silenced with the bloom `_`-prefix trick on body-only defs. Treat `aql
+check` as advisory for this module, not gating.
+
+### 12. 🟡 `-force-compile` is gated by `aql check`, so check noise blocks it
+
+`-force-compile` refuses with `force-compile: check diagnostics` — it
+declines whenever the static checker emits error diagnostics, regardless of
+whether the program would actually lower. Because §11's diagnostics are
+false positives, strict compilation is blocked even though `-compile`
+(non-strict) compiles-or-falls-back and runs every suite green. So the
+refusal is a *consequence* of §11, not an independent compiler limitation;
+closing §11 upstream would unblock this too.
+
+### 13. ✅ Soundness holds: `-compile` is byte-identical to the interpreter
+
+The positive result worth recording: with `-compile` (bytecode where
+possible, silent interpreter fallback otherwise), every suite still prints
+`all green`, and a direct interpret-vs-`-compile` diff of multi-engine
+renders (liquid `for`+filter+`forloop.last`, jinja `if`, handlebars
+`each`) is **byte-identical**. The "opt-in performance, never semantics"
+contract is upheld for this module — the compile path is safe to use even
+though strict `-force-compile` is blocked by §11/§12.
+
+---
+
 ## Summary
 
 | # | Severity | Issue |
@@ -145,3 +225,14 @@ the def-time trace short-circuits on empty input.
 | 8 | 🟡 | forward `or`/`and` mis-collects bare-variable operands; use the pipeline form |
 | 9 | 🟢 | naive comma split breaks quoted filter args; a quote-aware splitter is needed |
 | 10 | 🟢 | the §2/§3/§4 traps recur across the multi-engine layer (reserved words, map-literal scoping, guarded mutual recursion) |
+| 11 | 🟡 | `aql check` reports 24 emergent errors on the module (runtime-registered parsers, dynamic dispatch, emergent paren/unused_def false positives); not gating-ready |
+| 12 | 🟡 | `-force-compile` is gated by `aql check`, so §11's false positives block strict bytecode (non-strict `-compile` is fine) |
+| 13 | ✅ | soundness holds: `-compile` runs every suite green and is byte-identical to the interpreter |
+
+## Surface status at a glance
+
+- **Interpret:** ✅ clean — module + all 8 suites, no errors.
+- **Compile (`-compile`):** ✅ runs; suites green; byte-identical to interpret.
+- **Check (`aql check`):** ❌ module 24 errors / 10 warnings (all checker
+  limitations, §11); tests only `unused_def` warnings.
+- **Force-compile (`-force-compile`):** ❌ refuses on check diagnostics (§12).
