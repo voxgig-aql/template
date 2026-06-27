@@ -1,9 +1,9 @@
 # CLAUDE.md
 
 This repository is the `Template` library: sandboxed templating languages
-written in AQL. The `mustache` engine is implemented end-to-end; the
-common interface is designed so `handlebars`, `liquid`, and `jinja` slot
-onto the same pipeline.
+written in AQL. Four engines — `mustache`, `handlebars`, `liquid`, and
+`jinja` — are implemented on one shared pipeline, selected by the `engine`
+field with identical config and context data.
 
 ## Using the library
 
@@ -19,9 +19,13 @@ Each engine follows one pipeline (see the header of `template.aql`):
 1. **Parse** — `aql:parse` defines the template grammar. A custom lex
    matcher segments the source into a typed token stream and a declarative
    `Parse.rule` recognizes it, registered as a `parse <engine>` kind.
+   mustache/handlebars share the `{{ }}` lexer; liquid adds `{% %}`; jinja
+   adds `{# #}`.
 2. **Compile** — the token stream is lowered to an AQL program: a fixed
    runtime prelude of custom `tpl_*` words plus a `__render` function that
-   builds the output by calling only those words.
+   builds the output by calling only those words. mustache and handlebars
+   have their own compilers; liquid and jinja share one `compile-tagged-seq`
+   over the union of their tag vocabularies.
 3. **Run** — the program executes through `aql:vm` in a fresh sub-engine
    under a totally restricted policy (every capability scope uninstalled),
    so a template can never do I/O or escape the sandbox.
@@ -48,6 +52,8 @@ Each engine follows one pipeline (see the header of `template.aql`):
   `dx-report.md` (the `fn`-body def-time trace, mixed argument-order
   conventions, map-literal scoping, and the unenforced `aql:vm` step
   budget).
-- Status: this is the **library + tests first** pass. The full Diátaxis
-  docs, the bundled skill/plugin, and the CI workflow still describe the
-  bloom-filter template and are pending a rewrite for `Template`.
+- Status: this is the **library + tests first** pass — all four engines
+  implemented and green (mustache unit/prop/spec + smoke, plus a unit
+  suite each for handlebars/liquid/jinja). The full Diátaxis docs, the
+  bundled skill/plugin, and the CI workflow still describe the bloom-filter
+  template and are pending a rewrite for `Template`.

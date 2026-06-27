@@ -9,11 +9,11 @@ AQL project. Every code block below is verified to run against
 ## What it is
 
 A templating engine that renders text templates against a data context,
-with a **common interface across templating languages**. Today the
-`mustache` engine is implemented end-to-end; `handlebars`, `liquid`, and
-`jinja` share the same pipeline and are reserved (selecting one raises
-`unknown_engine`). The public surface is the `Template` namespace plus the
-`Compiled` type.
+with a **common interface across templating languages**. Four engines are
+implemented on one shared pipeline — **`mustache`**, **`handlebars`**,
+**`liquid`**, and **`jinja`** — selected by the `engine` field; the config
+and context data structures are identical across all of them. The public
+surface is the `Template` namespace plus the `Compiled` type.
 
 Every render runs inside a **sandbox**: the template is parsed (via
 `aql:parse`), compiled to a small AQL program built from a fixed set of
@@ -57,7 +57,7 @@ print (tpl Template.render {name:'Ada'})   # => Hi Ada!
 | `{engine:String, source:String} Template.compile` | `Compiled` | Parse + compile a template once. Bad args raise `bad_input`; an unimplemented engine raises `unknown_engine`. |
 | `compiled Template.render context` | `String` | Render a compiled template against a context (any Map/value). |
 | `{engine, source, context} Template.render` | `String` | One-shot convenience: compile then render in one call. |
-| `Template.engines` | `List` | The engines this build implements (`['mustache']`). |
+| `Template.engines` | `List` | The engines this build implements (`['mustache' 'handlebars' 'liquid' 'jinja']`). |
 
 `Compiled` has read-only fields `engine` (String) and `program` (the
 generated AQL source). Build it only through `Template.compile`.
@@ -72,20 +72,47 @@ mismatched section; a truly unterminated tag surfaces as
 > key**. On this build `get` evaluates its key argument, so a bare
 > `e get code` is an "undefined word: code" error.
 
-## Mustache features supported
+## Engines and their features
 
-- `{{name}}` — HTML-escaped interpolation (`& < > "`)
-- `{{{name}}}` and `{{& name}}` — unescaped interpolation
-- `{{#section}}…{{/section}}` — section: iterates a list (with `{{.}}` as
-  the current item), enters a map as the new context, or renders once for
-  a truthy scalar; renders nothing for a falsy value (`None`/`false`/`""`/`[]`)
-- `{{^section}}…{{/section}}` — inverted section (renders iff falsy/empty)
-- `{{! comment }}` — comment (renders nothing)
-- `{{a.b.c}}` dotted lookup, `{{.}}` implicit current item
+All four share dotted lookups (`a.b.c`), the `{{ }}` output delimiter, and
+the same context data. Where escaping differs: **mustache and handlebars
+HTML-escape** `{{x}}` (use `{{{x}}}` / `{{& x}}` for raw); **liquid and
+jinja do not escape** by default (use the `escape` filter for HTML).
 
-Not yet implemented: partials (`{{> name}}` renders empty), set-delimiter
-tags, lambdas, and **parent-context fallback** — inside a section, lookups
-see the section's own frame, not enclosing frames.
+**mustache**
+- `{{name}}` escaped, `{{{name}}}` / `{{& name}}` raw, `{{! comment }}`
+- `{{#section}}…{{/section}}` — list iteration (`{{.}}` = current item),
+  map context, or truthy-scalar; `{{^section}}…{{/section}}` inverted
+
+**handlebars** (mustache lexer + block helpers)
+- `{{#if x}}…{{else}}…{{/if}}`, `{{#unless x}}…{{/unless}}`
+- `{{#each xs}}…{{/each}}` with `{{this}}`, `{{@index}}`, `{{@first}}`,
+  `{{@last}}`, and item fields; `{{#with obj}}…{{/with}}`
+- a `{{#name}}` whose first word is not a helper falls back to a section
+
+**liquid** (`{{ output }}` + `{% tags %}`)
+- filters: `{{ x | upcase | join: ", " }}`
+- `{% if a > b %}…{% elsif c %}…{% else %}…{% endif %}`, `{% unless %}…{% endunless %}`
+- `{% for x in xs %}…{% else %}…{% endfor %}` with `forloop.index/first/last/length`
+- `{% assign v = expr %}`, `{% comment %}…{% endcomment %}`
+- conditions support `== != < > <= >=` and `and` / `or`
+
+**jinja** (`{{ }}` + `{% %}` + `{# comments #}`)
+- filters: `{{ x | lower | capitalize }}`
+- `{% if %}…{% elif %}…{% else %}…{% endif %}`
+- `{% for x in xs %}…{% else %}…{% endfor %}` with `loop.index/first/last/length`
+- `{% set v = expr %}`
+
+Built-in filters (liquid/jinja): `upcase`/`upper`, `downcase`/`lower`,
+`capitalize`, `size`/`length`, `first`, `last`, `join`, `default`,
+`append`, `prepend`, `replace`, `escape`, `strip`/`trim`.
+
+Not yet implemented (any engine): partials/includes, template
+inheritance, custom helpers/filters, set-delimiter tags, lambdas, and
+**parent-context fallback in mustache/handlebars sections** (liquid/jinja
+`for` and handlebars `each`/`with` *do* see the surrounding context, since
+they merge it). Filter arguments are simple literals/paths (commas inside
+quotes are handled; nested pipes inside a quoted arg are not).
 
 ## Copy-paste idioms (all verified)
 
@@ -120,10 +147,21 @@ print ({engine:'mustache' source:src context:{user:{name:'Ada' likes:['x' 'y']}}
 # => Ada likes x y
 ```
 
-Handle a bad engine or template:
+Each of the other three engines:
 
 ```aql
-def result (do [{engine:'liquid' source:'x' context:{}} Template.render] error [
+print ({engine:'handlebars' source:'{{#each xs}}{{@index}}:{{this}} {{/each}}' context:{xs:['a' 'b']}} Template.render)
+# => 0:a 1:b
+print ({engine:'liquid' source:'{% for x in xs %}{{ x | upcase }} {% endfor %}' context:{xs:['a' 'b']}} Template.render)
+# => A B
+print ({engine:'jinja' source:'{% if n > 1 %}{{ n }} big{% endif %}' context:{n:3}} Template.render)
+# => 3 big
+```
+
+Handle a bad engine or template (`erb` is not implemented):
+
+```aql
+def result (do [{engine:'erb' source:'x' context:{}} Template.render] error [
   get "message"                            # or: get "code", case […]
 ])
 print (result)

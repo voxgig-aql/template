@@ -103,6 +103,32 @@ Two `Assert.equal` statements on consecutive lines: the first forward-
 collects the second (`expected fn assert-equal(...)`). End each with
 `end` (`expected actual Assert.equal end`), as the suites do.
 
+### 8. 🟡 `or` / `and` forward form mis-collects bare-variable operands
+
+`(or is-sec is-inv)` (forward, two bare variables) raised
+`no matching signature for or` with the operands arriving as unresolved
+words. The **pipeline form** `(is-sec or is-inv)` works. (Forward `or`
+with *parenthesised* operands — `(or (a eq b) (c eq d))` — is fine; the
+breakage is specifically bare variables in forward position.) The
+multi-engine compiler uses the pipeline form throughout.
+
+### 9. 🟢 Naive comma split breaks quoted filter args
+
+Splitting `{{ x | join: ", " }}`'s argument list on `,` shreds the quoted
+`", "`. The compiler uses a small quote-aware splitter (`split-args`)
+instead, so `join: ", "` and `replace: "a", "b"` parse correctly. Pipes
+(`|`) inside a quoted argument are still not supported.
+
+### 10. 🟢 Building the multi-engine layer hit the §2/§3/§4 traps repeatedly
+
+The void-fn def-time trace (§2), per-word argument order (§3), and
+map-literal scoping (§4) each recurred while adding handlebars/liquid/jinja
+— e.g. `args` and `base` are reserved words that must be renamed; result
+maps must use the `do { k:[expr] }` form; recursion is fine but only
+*self*-reference is unbound, so mutual recursion (compile-tagged-seq ↔
+liquid-if/liquid-for) works as long as each fn guards its list indexing so
+the def-time trace short-circuits on empty input.
+
 ---
 
 ## Summary
@@ -116,3 +142,6 @@ collects the second (`expected fn assert-equal(...)`). End each with
 | 5 | 🟡 | aql:vm enforces capability scopes but not the step/time limits |
 | 6 | 🟢 | `get` evaluates a dynamic key on main (so error reads need `get "code"`) |
 | 7 | 🟢 | chained `Assert.equal` needs `end` terminators |
+| 8 | 🟡 | forward `or`/`and` mis-collects bare-variable operands; use the pipeline form |
+| 9 | 🟢 | naive comma split breaks quoted filter args; a quote-aware splitter is needed |
+| 10 | 🟢 | the §2/§3/§4 traps recur across the multi-engine layer (reserved words, map-literal scoping, guarded mutual recursion) |

@@ -1,0 +1,84 @@
+# jinja engine unit tests (aql:test imperative API).
+#
+# Jinja has three delimiters — {{ output }}, {% tags %}, {# comments #} —
+# output filters (`{{ x | f }}`), if/elif/else/endif, for/else with loop
+# metadata, and set. Output is NOT HTML-escaped (vanilla Jinja default).
+#
+# Run:
+#   aql test/jinja_unit_test.aql
+
+
+import "aql:test"
+import "./template.aql"
+
+def jj fn [ [src:String ctx:Any] [String] [
+  {engine:'jinja' source:src context:ctx} Template.render
+] ]
+
+
+# --- output + filters + {# comment #} -------------------------------
+
+[
+  "Ada!"  (jj "{{ name | capitalize }}{# note #}!" {name:'ada'}) Assert.equal end
+  "World" (jj "{{ name | lower | capitalize }}" {name:'WORLD'}) Assert.equal end
+  "ab"    (jj "a{# this vanishes #}b" {}) Assert.equal end
+] "output-filters-comment" Test.test
+
+
+# --- if / elif / else -----------------------------------------------
+
+[
+  "zero" (jj "{% if n < 0 %}neg{% elif n == 0 %}zero{% else %}pos{% endif %}" {n:0}) Assert.equal end
+  "neg"  (jj "{% if n < 0 %}neg{% elif n == 0 %}zero{% else %}pos{% endif %}" {n:-3}) Assert.equal end
+  "pos"  (jj "{% if n < 0 %}neg{% elif n == 0 %}zero{% else %}pos{% endif %}" {n:7}) Assert.equal end
+] "if-elif-else" Test.test
+
+
+# --- and / or -------------------------------------------------------
+
+[
+  "both" (jj "{% if a and b %}both{% endif %}" {a:true b:true}) Assert.equal end
+  "yes"  (jj "{% if a or b %}yes{% endif %}" {a:false b:true}) Assert.equal end
+] "and-or" Test.test
+
+
+# --- for loops + loop metadata + else -------------------------------
+
+[
+  "1:a 2:b " (jj "{% for x in xs %}{{ loop.index }}:{{ x }} {% endfor %}" {xs:['a' 'b']}) Assert.equal end
+  "empty"    (jj "{% for x in xs %}{{x}}{% else %}empty{% endfor %}" {xs:[]}) Assert.equal end
+  "a|b|c|"   (jj "{% for x in xs %}{{x}}|{% endfor %}" {xs:['a' 'b' 'c']}) Assert.equal end
+] "for" Test.test
+
+
+# --- set -------------------------------------------------------------
+
+[
+  "Y"   (jj "{% set x = \"Y\" %}{{ x }}" {}) Assert.equal end
+  "5"   (jj "{% set x = n %}{{ x }}" {n:5}) Assert.equal end
+] "set" Test.test
+
+
+# --- nested for + if -------------------------------------------------
+
+[
+  "[1][3]"
+    (jj "{% for r in rows %}{% if r.on %}[{{ r.v }}]{% endif %}{% endfor %}"
+        {rows:[{on:true v:1} {on:false v:2} {on:true v:3}]}) Assert.equal end
+] "nested" Test.test
+
+
+# --- malformed: unclosed block raises -------------------------------
+
+[
+  def e (do [(jj "{% if a %}x" {a:true})])
+  template_syntax/q (e get "code") Assert.equal end
+] "unclosed-raises" Test.test
+
+
+# --- summary -------------------------------------------------------
+
+print ("---")
+print (`fail count: ${(Test.fail-count)}`)
+0 (Test.fail-count) Assert.equal end
+print ("all green")

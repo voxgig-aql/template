@@ -38,4 +38,15 @@ print (`compiled: engine=${tpl.engine}`)
 print (`render 1: ${(tpl Template.render {v:1})}`)
 print (`render 2: ${(tpl Template.render {v:2})}`)
 
+# Handlebars: block helpers (if/else, each with this/@index).
+print (`hbs if:   ${({engine:'handlebars' source:'{{#if ok}}Y{{else}}N{{/if}}' context:{ok:true}} Template.render)}`)
+print (`hbs each: ${({engine:'handlebars' source:'{{#each xs}}{{@index}}={{this}} {{/each}}' context:{xs:['a' 'b']}} Template.render)}`)
+
+# Liquid: {{ output | filters }} and {% tags %}.
+print (`liq:      ${({engine:'liquid' source:'{% for x in xs %}{{ x | upcase }} {% endfor %}' context:{xs:['a' 'b']}} Template.render)}`)
+print (`liq if:   ${({engine:'liquid' source:'{% if n > 1 %}big{% else %}small{% endif %}' context:{n:3}} Template.render)}`)
+
+# Jinja: {{ }}, {% %}, {# #}, loop metadata, set.
+print (`jinja:    ${({engine:'jinja' source:'{% set g = "hi" %}{{ g }} {% for x in xs %}{{ loop.index }}{% endfor %}{# c #}' context:{xs:['a' 'b' 'c']}} Template.render)}`)
+
 print ("--- done ---")

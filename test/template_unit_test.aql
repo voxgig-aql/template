@@ -131,7 +131,7 @@ import "./template.aql"
 # --- an unknown engine is rejected ----------------------------------
 
 [
-  def e (do [{engine:'liquid' source:'x' context:{}} Template.render])
+  def e (do [{engine:'erb' source:'x' context:{}} Template.render])
   unknown_engine/q (e get "code") Assert.equal end
 ] "unknown-engine" Test.test
 

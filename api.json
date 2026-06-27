@@ -2,7 +2,7 @@
   "name": "template",
   "version": "0.1.0",
   "aql_ref": "b849948",
-  "description": "Sandboxed templating languages for AQL: render text templates against a data context through one common interface, exposed as the single `Template` namespace. The mustache engine is implemented; handlebars/liquid/jinja share the same pipeline and are reserved.",
+  "description": "Sandboxed templating languages for AQL: render text templates against a data context through one common interface, exposed as the single `Template` namespace. Four engines are implemented on the shared parse->compile->sandbox pipeline: mustache, handlebars, liquid, jinja.",
   "conventions": {
     "import": "import \"./template.aql\"  — the library imports its own aql:* deps (aql:parse, aql:parselang, aql:string-util, aql:vm); callers need not",
     "call": "receiver-first, arguments forward (preferred): `receiver Template.verb arg...`. Group in parens to use the result as a value, e.g. `(tpl Template.render ctx)`.",
@@ -10,8 +10,16 @@
     "pipeline": "each render is parse (aql:parse grammar) -> compile (to an AQL program of custom tpl_* words) -> run (aql:vm sub-engine under a totally restricted policy with every capability scope uninstalled), so a template can never do I/O or escape the sandbox",
     "import_resolution": "relative to the working directory the script is run from, not the importing file",
     "external_deps": ["aql:parse", "aql:parselang", "aql:string-util", "aql:vm"],
-    "errors": "failures raise coded errors caught with `do [...] error [...]`; read e.code / e.message via `e get \"code\"` (a QUOTED string key — on this build `get` evaluates its key argument). Codes: bad_input (compile/render args missing or wrong type), unknown_engine (engine not implemented), template_syntax (malformed/unbalanced template; a truly unterminated tag surfaces as parse_syntax_error from the parser).",
-    "escaping": "{{var}} is HTML-escaped (& < > \"); {{{var}}} and {{& var}} are raw"
+    "errors": "failures raise coded errors caught with `do [...] error [...]`; read e.code / e.message via `e get \"code\"` (a QUOTED string key — on this build `get` evaluates its key argument). Codes: bad_input (compile/render args missing or wrong type), unknown_engine (engine not implemented, e.g. 'erb'), template_syntax (malformed/unbalanced template; a truly unterminated tag surfaces as parse_syntax_error from the parser).",
+    "escaping": "mustache and handlebars HTML-escape {{var}} (& < > \"), with {{{var}}} / {{& var}} raw; liquid and jinja output is raw by default (use the `escape` filter)."
+  },
+  "engines": {
+    "mustache": "{{var}} escaped, {{{var}}}/{{& var}} raw, {{#section}}/{{^inverted}} (list/map/boolean), {{! comment }}, dotted, {{.}}",
+    "handlebars": "mustache lexer + block helpers {{#if}}{{else}}, {{#unless}}, {{#each}} (this/@index/@first/@last/fields), {{#with}}",
+    "liquid": "{{ output | filters }} and {% tags %}: if/elsif/else/endif, unless, for/else (forloop.*), assign, comment; conditions == != < > <= >= and/or",
+    "jinja": "{{ output | filters }}, {% tags %}, {# comments #}: if/elif/else/endif, for/else (loop.*), set",
+    "filters": "liquid/jinja: upcase/upper, downcase/lower, capitalize, size/length, first, last, join, default, append, prepend, replace, escape, strip/trim",
+    "not_implemented": "partials/includes, template inheritance, custom helpers/filters, set-delimiters, lambdas, parent-context fallback in mustache/handlebars sections"
   },
   "modules": {
     "template.aql": { "kind": "templating engine", "namespaces": ["Template"] }

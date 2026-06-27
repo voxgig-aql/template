@@ -1,0 +1,87 @@
+# liquid engine unit tests (aql:test imperative API).
+#
+# Liquid has two delimiters — {{ output }} and {% tags %} — output
+# filters (`{{ x | f: arg }}`), if/elsif/else/endif, unless, for/else with
+# forloop metadata, assign, and {% comment %}. Output is NOT HTML-escaped
+# (Liquid's default).
+#
+# Run:
+#   aql test/liquid_unit_test.aql
+
+
+import "aql:test"
+import "./template.aql"
+
+def lq fn [ [src:String ctx:Any] [String] [
+  {engine:'liquid' source:src context:ctx} Template.render
+] ]
+
+
+# --- output + filters -----------------------------------------------
+
+[
+  "Hi ada!"  (lq "Hi {{ name }}!" {name:'ada'}) Assert.equal end
+  "Hi ADA!"  (lq "Hi {{ name | upcase }}!" {name:'ada'}) Assert.equal end
+  "World"    (lq "{{ name | downcase | capitalize }}" {name:'WORLD'}) Assert.equal end
+  "a, b, c"  (lq "{{ xs | join: \", \" }}" {xs:['a' 'b' 'c']}) Assert.equal end
+  "none"     (lq "{{ x | default: \"none\" }}" {}) Assert.equal end
+  "3"        (lq "{{ xs | size }}" {xs:['a' 'b' 'c']}) Assert.equal end
+] "output-filters" Test.test
+
+
+# --- if / elsif / else ----------------------------------------------
+
+[
+  "big"   (lq "{% if n > 2 %}big{% else %}small{% endif %}" {n:5}) Assert.equal end
+  "small" (lq "{% if n > 2 %}big{% else %}small{% endif %}" {n:1}) Assert.equal end
+  "two"   (lq "{% if n == 1 %}one{% elsif n == 2 %}two{% else %}many{% endif %}" {n:2}) Assert.equal end
+  "many"  (lq "{% if n == 1 %}one{% elsif n == 2 %}two{% else %}many{% endif %}" {n:9}) Assert.equal end
+] "if-elsif-else" Test.test
+
+
+# --- unless ----------------------------------------------------------
+
+[
+  "hidden" (lq "{% unless ok %}hidden{% endunless %}" {ok:false}) Assert.equal end
+  ""       (lq "{% unless ok %}hidden{% endunless %}" {ok:true}) Assert.equal end
+] "unless" Test.test
+
+
+# --- and / or in conditions -----------------------------------------
+
+[
+  "both" (lq "{% if a and b %}both{% endif %}" {a:true b:true}) Assert.equal end
+  ""     (lq "{% if a and b %}both{% endif %}" {a:true b:false}) Assert.equal end
+  "yes"  (lq "{% if a or b %}yes{% endif %}" {a:false b:true}) Assert.equal end
+] "and-or" Test.test
+
+
+# --- for loops + forloop metadata + else ----------------------------
+
+[
+  "a-b-c-" (lq "{% for x in xs %}{{ x }}-{% endfor %}" {xs:['a' 'b' 'c']}) Assert.equal end
+  "123!"   (lq "{% for x in xs %}{{ forloop.index }}{% if forloop.last %}!{% endif %}{% endfor %}" {xs:['a' 'b' 'c']}) Assert.equal end
+  "empty"  (lq "{% for x in xs %}{{x}}{% else %}empty{% endfor %}" {xs:[]}) Assert.equal end
+] "for" Test.test
+
+
+# --- assign ----------------------------------------------------------
+
+[
+  "hi Z" (lq "{% assign g = \"hi\" %}{{ g }} {{ name }}" {name:'Z'}) Assert.equal end
+] "assign" Test.test
+
+
+# --- comment renders nothing ----------------------------------------
+
+[
+  "ab" (lq "a{% comment %}skip{% endcomment %}b" {}) Assert.equal end
+] "comment" Test.test
+
+
+# --- summary -------------------------------------------------------
+
+print ("---")
+print (`fail count: ${(Test.fail-count)}`)
+0 (Test.fail-count) Assert.equal end
+print ("all green")
