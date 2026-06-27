@@ -1,123 +1,135 @@
-# bloom-filter
+# template
 
-A small, dependency-light **bloom filter** implemented in
-[AQL](https://github.com/aql-lang/aql) — a probabilistic set that
-answers *"have I seen this item?"* in far less memory than storing the
-items, with no false negatives and a false-positive rate you choose up
-front.
+**Sandboxed templating languages** implemented in
+[AQL](https://github.com/aql-lang/aql). One common interface renders
+templates against a data context across **four engines** — `mustache`,
+`handlebars`, `liquid`, and `jinja` — all on the same parse → compile →
+sandboxed-run pipeline, selected by the `engine` field with identical
+config and context data.
 
 ```aql
-import "./bloom.aql"
+import "./template.aql"
 
-def seen ({n: 10000, p: 0.01} Bloom.make)
-def _ (seen Bloom.add "ada")
+# one-shot
+print ({engine:'mustache' source:'Hi {{name}}!' context:{name:'Ada'}} Template.render)
+# => Hi Ada!
 
-print (seen Bloom.contains "ada")     # => true
-print (seen Bloom.contains "linus")   # => false
+# or compile once, render many contexts
+def tpl ({engine:'mustache' source:'{{#xs}}[{{.}}]{{/xs}}'} Template.compile)
+print (tpl Template.render {xs:['a' 'b' 'c']})   # => [a][b][c]
+
+# same interface, different engine
+print ({engine:'liquid' source:'{% for x in xs %}{{ x | upcase }} {% endfor %}' context:{xs:['a' 'b']}} Template.render)
+# => A B
 ```
-
-> **Forking this to build a new AQL library?** This repo is a GitHub
-> template — read **[TEMPLATE.md](TEMPLATE.md)** for the instantiation
-> checklist, then delete it.
 
 > **Calling this library from an AI coding agent?** Read
 > **[AGENTS.md](AGENTS.md)** first — the exact AQL calling convention,
-> verified idioms, and common mistakes. (Claude Code auto-loads it via
+> verified idioms, and common mistakes. Claude Code auto-loads it via
 > `CLAUDE.md`; a portable skill lives in
-> [`.claude/skills/bloom-filter-aql`](.claude/skills/bloom-filter-aql/SKILL.md).)
+> [`.claude/skills/template-aql`](.claude/skills/template-aql/SKILL.md).
 
-## Documentation
+## How it works
 
-The docs follow the [Diátaxis](https://diataxis.fr) framework — four
-modes, each serving a different need. Start wherever your need is:
+Every engine shares one pipeline, and every render is **sandboxed**:
 
-| | Mode | Read this when you want to… |
-|--|------|----------------------------|
-| 🎓 | **[Tutorial](docs/tutorial.md)** | learn by building your first filter step by step |
-| 🔧 | **[How-to guides](docs/how-to.md)** | accomplish a specific task (size, merge, persist, test…) |
-| 📖 | **[Reference](docs/reference.md)** | look up exact words, signatures, and return types |
-| 💡 | **[Explanation](docs/explanation.md)** | understand how it works and why it's built this way |
+1. **Parse** — `aql:parse` defines the template grammar (a custom lex
+   matcher segments the source; a declarative `Parse.rule` recognizes the
+   token stream), registered as a `parse <engine>` kind.
+2. **Compile** — the tokens are lowered to an AQL program built from a
+   fixed set of custom `tpl_*` words plus a `__render` function.
+3. **Run** — the program executes through `aql:vm` in a fresh sub-engine
+   under a totally restricted policy: every capability (network, fileops,
+   process, env, sqlite) is uninstalled, so a template can never perform
+   I/O or escape the sandbox.
 
-New here? Read the [Tutorial](docs/tutorial.md). Already know bloom
-filters and just want the API? Jump to the [Reference](docs/reference.md).
+See the header of [`template.aql`](template.aql) for the full design.
 
-## The `Bloom` API at a glance
+## The `Template` API at a glance
 
-| Word | Purpose |
+| Call | Purpose |
 |------|---------|
-| `{n, p} Bloom.make`      | build a filter sized for capacity `n` at false-positive rate `p` |
-| `bf Bloom.add item`      | insert an item (mutates `bf`) |
-| `bf Bloom.contains item` | test membership → Boolean |
-| `bf Bloom.count`         | estimate distinct items added |
-| `bf Bloom.params`        | report `{n, p, m, k}` |
-| `a Bloom.merge b`        | union two filters with matching `(m, k)` |
-| `bf Bloom.encode`        | serialize to a snapshot string |
-| `text Bloom.decode`      | rebuild a filter from a snapshot string |
+| `{engine, source} Template.compile` | parse + compile a template → `Compiled` |
+| `compiled Template.render context`  | render a compiled template against a context → String |
+| `{engine, source, context} Template.render` | one-shot: compile + render |
+| `Template.engines` | the engines this build implements (`['mustache' 'handlebars' 'liquid' 'jinja']`) |
 
-Full details, including the calling convention (every call ends with
-`end`), are in the [Reference](docs/reference.md).
+Per-engine support at a glance:
 
-## For AI coding agents
+- **mustache** — `{{var}}` (HTML-escaped), `{{{var}}}`/`{{& var}}` (raw),
+  `{{#section}}` (list/object/boolean), `{{^inv}}`, `{{! comment }}`, dotted, `{{.}}`
+- **handlebars** — the above plus block helpers `{{#if}}{{else}}`,
+  `{{#unless}}`, `{{#each}}` (`{{this}}`/`{{@index}}`), `{{#with}}`
+- **liquid** — `{{ x | filter: arg }}`, `{% if/elsif/else %}`,
+  `{% unless %}`, `{% for x in xs %}` (`forloop.*`), `{% assign %}`, `{% comment %}`
+- **jinja** — `{{ x | filter }}`, `{% if/elif/else %}`,
+  `{% for %}` (`loop.*`), `{% set %}`, `{# comments #}`
 
-If an agent will call this library, point it at **[AGENTS.md](AGENTS.md)**
-— the exact AQL calling convention, verified idioms, and the common
-mistakes to avoid.
-
-To make that guidance available in *another* project that uses this
-library, install the bundled skill either way:
-
-- **Copy the skill** — drop
-  [`.claude/skills/bloom-filter-aql/`](.claude/skills/bloom-filter-aql/SKILL.md)
-  into that project's `.claude/skills/` (or your `~/.claude/skills/`). It
-  loads on demand whenever Bloom calls appear.
-- **Install the plugin** — this repo is also a plugin marketplace:
-
-  ```
-  /plugin marketplace add voxgig-aql/bloom-filter
-  /plugin install bloom-filter-aql@voxgig-aql
-  ```
-
-Working inside *this* repo, Claude Code picks the guidance up
-automatically via `CLAUDE.md` (which imports `AGENTS.md`) and the bundled
-skill.
+Full details, the filter list, and the calling convention are in
+**[AGENTS.md](AGENTS.md)**.
 
 ## Project layout
 
 ```
-bloom.aql                  the library (the Bloom namespace)
-AGENTS.md                  agent guide: how to call this library correctly
-test/bloom_unit_test.aql   example-based unit tests — direct (Test.test)
-test/bloom_unit_spec.aql   example-based unit tests — declarative spec format
-test/bloom_prop_test.aql   property-based tests — direct (Test.check-prop)
-test/bloom_prop_spec.aql   property-based tests — declarative spec format
-test/bloom_smoke_test.aql  end-to-end smoke run over every public word
-docs/                      Diátaxis documentation (above)
-dx-report.md               developer-experience notes (current pin: aql @ 407feda)
-proposals/                 language proposals raised from this module's DX
+template.aql                    the library (the Template namespace, 4 engines)
+AGENTS.md                       agent guide: how to call this library correctly
+CLAUDE.md                       Claude Code entrypoint; @-imports AGENTS.md
+test/template_*_test|spec.aql   mustache unit/prop suites + smoke (the spine)
+test/handlebars_unit_test.aql   handlebars engine unit tests
+test/liquid_unit_test.aql       liquid engine unit tests
+test/jinja_unit_test.aql        jinja engine unit tests
+dx-report.md                    developer-experience notes (pin: aql @ b849948)
 ```
-
-Test files follow a consistent naming convention: `_test.aql` for
-direct tests (unit or property), `_spec.aql` for declarative specs (unit
-or property).
 
 ## Running it
 
-Build the `aql` interpreter, then run any script or test — see
-[How-to → Install and run](docs/how-to.md#install-and-run-aql) and
-[Run the tests](docs/how-to.md#run-the-tests):
+Build the `aql` interpreter from source (latest `main`), then run any
+script or test:
 
 ```bash
-aql test/bloom_unit_test.aql   # unit tests — direct
-aql test/bloom_unit_spec.aql   # unit tests — declarative spec format
-aql test/bloom_prop_test.aql   # property tests — direct
-aql test/bloom_prop_spec.aql   # property tests — declarative spec format
-aql test/bloom_smoke_test.aql  # end-to-end smoke run
+# build aql (the template pins aql-lang/aql @ b849948…)
+mkdir -p /tmp/aql && curl -fsSL \
+  "https://codeload.github.com/aql-lang/aql/tar.gz/main" \
+  | tar -xz -C /tmp/aql --strip-components=1
+( cd /tmp/aql/cmd/go && GOFLAGS=-mod=mod go build -o "$HOME/.local/bin/aql" ./aql )
+
+# run every suite (each ends with `all green`)
+for f in test/*.aql; do aql "$f"; done
 ```
 
-A GitHub Actions workflow
-([`.github/workflows/test.yml`](.github/workflows/test.yml)) builds aql from a
-pinned commit and runs every suite — plus a `consistency` job (agent-skill
-drift, JSON manifests, and a pinned-ref guard) — on each push and pull request.
+In Claude Code web sessions the SessionStart hook
+(`.claude/hooks/session-start.sh`) builds aql automatically.
+
+## For AI coding agents
+
+Point agents at **[AGENTS.md](AGENTS.md)** — the calling convention,
+per-engine features, verified idioms, and common mistakes. To make that
+guidance available in *another* project that uses this library:
+
+- **Copy the skill** — drop
+  [`.claude/skills/template-aql/`](.claude/skills/template-aql/SKILL.md)
+  into that project's `.claude/skills/` (or `~/.claude/skills/`). It loads
+  on demand whenever `Template` calls appear.
+- **Install the plugin** — this repo is also a plugin marketplace:
+
+  ```
+  /plugin marketplace add voxgig-aql/template
+  /plugin install template-aql@voxgig-aql
+  ```
+
+Inside *this* repo, Claude Code picks it up automatically via `CLAUDE.md`
+(which imports `AGENTS.md`) and the bundled skill.
+
+## Status
+
+The library is complete: `template.aql` (all four engines), the eight test
+suites, the [Diátaxis docs](docs/), the agent guides
+([AGENTS.md](AGENTS.md) / [CLAUDE.md](CLAUDE.md) / the `template-aql` skill
++ plugin / [api.json](api.json)), and the CI workflow ([`ci/test.yml`](ci/test.yml))
+are all current against aql `b849948`. Known scope limits (partials,
+inheritance, custom helpers/filters, parent-context fallback in
+mustache/handlebars sections) are listed in [AGENTS.md](AGENTS.md); the
+interpret/check/compile surface status is in [dx-report.md](dx-report.md).
 
 ## License
 

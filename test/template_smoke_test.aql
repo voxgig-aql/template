@@ -1,0 +1,52 @@
+# Smoke test for the template module. Imports the library and walks
+# through the public surface — compile, render (two-step and one-shot),
+# every mustache tag kind, and the engine list. A clean end-to-end run
+# (no errors) is the pass condition.
+#
+# Prints are written one value per statement (`print (value)`): `print`
+# collects a forward argument, so chained postfix prints reverse.
+#
+# Run:
+#   aql test/template_smoke_test.aql
+
+import "./template.aql"
+
+print ("--- template smoke demo ---")
+
+print (`engines: ${Template.engines}`)
+
+# One-shot render: compile + render in a single call.
+print (`hello:    ${({engine:'mustache' source:'Hello {{name}}!' context:{name:'Ada'}} Template.render)}`)
+
+# Escaped vs unescaped interpolation.
+print (`escape:   ${({engine:'mustache' source:'{{html}} | {{{html}}}' context:{html:'<b>&"'}} Template.render)}`)
+
+# List section with the implicit `.` iterator.
+print (`list:     ${({engine:'mustache' source:'{{#xs}}[{{.}}]{{/xs}}' context:{xs:['a' 'b' 'c']}} Template.render)}`)
+
+# Inverted section (renders only when falsy/empty).
+print (`inverted: ${({engine:'mustache' source:'{{^xs}}empty{{/xs}}' context:{xs:[]}} Template.render)}`)
+
+# Nested sections, dotted lookup, object section, comment.
+def src 'Hi {{user.name}}!{{! note }} Likes: {{#user.likes}}{{.}} {{/user.likes}}'
+def ctx {user:{name:'Ada' likes:['x' 'y']}}
+print (`nested:   ${({engine:'mustache' source:src context:ctx} Template.render)}`)
+
+# Two-step: compile once, render many contexts.
+def tpl ({engine:'mustache' source:'<{{v}}>'} Template.compile)
+print (`compiled: engine=${tpl.engine}`)
+print (`render 1: ${(tpl Template.render {v:1})}`)
+print (`render 2: ${(tpl Template.render {v:2})}`)
+
+# Handlebars: block helpers (if/else, each with this/@index).
+print (`hbs if:   ${({engine:'handlebars' source:'{{#if ok}}Y{{else}}N{{/if}}' context:{ok:true}} Template.render)}`)
+print (`hbs each: ${({engine:'handlebars' source:'{{#each xs}}{{@index}}={{this}} {{/each}}' context:{xs:['a' 'b']}} Template.render)}`)
+
+# Liquid: {{ output | filters }} and {% tags %}.
+print (`liq:      ${({engine:'liquid' source:'{% for x in xs %}{{ x | upcase }} {% endfor %}' context:{xs:['a' 'b']}} Template.render)}`)
+print (`liq if:   ${({engine:'liquid' source:'{% if n > 1 %}big{% else %}small{% endif %}' context:{n:3}} Template.render)}`)
+
+# Jinja: {{ }}, {% %}, {# #}, loop metadata, set.
+print (`jinja:    ${({engine:'jinja' source:'{% set g = "hi" %}{{ g }} {% for x in xs %}{{ loop.index }}{% endfor %}{# c #}' context:{xs:['a' 'b' 'c']}} Template.render)}`)
+
+print ("--- done ---")

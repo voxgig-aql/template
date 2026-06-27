@@ -1,0 +1,157 @@
+# template direct unit tests using aql:test's imperative API.
+#
+# Example-based checks of the mustache engine through the public
+# Template surface (compile / render, one-shot and two-step). The sibling
+# `test/template_unit_spec.aql` covers the same ground through the
+# declarative spec surface (Test.spec / Test.case / Test.run-spec).
+#
+# Error codes are read with `(e get "code")` — a String key — because on
+# this build `get` evaluates its key argument (a bare `code` would be an
+# undefined word).
+#
+# Run:
+#   aql test/template_unit_test.aql
+
+
+import "aql:test"
+import "./template.aql"
+
+
+# --- plain text passes through unchanged ----------------------------
+
+[
+  "just text" ({engine:'mustache' source:'just text' context:{}} Template.render) Assert.equal end
+] "plain-text" Test.test
+
+
+# --- variable interpolation is HTML-escaped -------------------------
+
+[
+  "Hi Ada!" ({engine:'mustache' source:'Hi {{name}}!' context:{name:'Ada'}} Template.render) Assert.equal end
+  "&lt;b&gt;&amp;&quot;"
+    ({engine:'mustache' source:'{{h}}' context:{h:'<b>&"'}} Template.render) Assert.equal end
+] "escaped-var" Test.test
+
+
+# --- triple-stache and ampersand are unescaped ----------------------
+
+[
+  "<b>&\"" ({engine:'mustache' source:'{{{h}}}' context:{h:'<b>&"'}} Template.render) Assert.equal end
+  "<b>"    ({engine:'mustache' source:'{{& h}}' context:{h:'<b>'}} Template.render) Assert.equal end
+] "unescaped-var" Test.test
+
+
+# --- a missing variable renders the empty string --------------------
+
+[
+  "a-b" ({engine:'mustache' source:'a-{{missing}}b' context:{}} Template.render) Assert.equal end
+] "missing-var-empty" Test.test
+
+
+# --- dotted lookup walks nested maps --------------------------------
+
+[
+  "Ada" ({engine:'mustache' source:'{{user.name}}' context:{user:{name:'Ada'}}} Template.render) Assert.equal end
+  "" ({engine:'mustache' source:'{{a.b.c}}' context:{a:{}}} Template.render) Assert.equal end
+] "dotted-lookup" Test.test
+
+
+# --- list section iterates; `.` is the current item -----------------
+
+[
+  "[a][b][c]"
+    ({engine:'mustache' source:'{{#xs}}[{{.}}]{{/xs}}' context:{xs:['a' 'b' 'c']}} Template.render) Assert.equal end
+  ""
+    ({engine:'mustache' source:'{{#xs}}x{{/xs}}' context:{xs:[]}} Template.render) Assert.equal end
+] "list-section" Test.test
+
+
+# --- object section makes the object the context --------------------
+
+[
+  "Ada:30"
+    ({engine:'mustache' source:'{{#u}}{{name}}:{{age}}{{/u}}' context:{u:{name:'Ada' age:30}}} Template.render) Assert.equal end
+] "object-section" Test.test
+
+
+# --- boolean section renders the body once (truthy) / not (falsy) ---
+
+[
+  "yes" ({engine:'mustache' source:'{{#ok}}yes{{/ok}}' context:{ok:true}} Template.render) Assert.equal end
+  ""    ({engine:'mustache' source:'{{#ok}}yes{{/ok}}' context:{ok:false}} Template.render) Assert.equal end
+] "boolean-section" Test.test
+
+
+# --- inverted section is the complement -----------------------------
+
+[
+  "none"  ({engine:'mustache' source:'{{^xs}}none{{/xs}}' context:{xs:[]}} Template.render) Assert.equal end
+  ""      ({engine:'mustache' source:'{{^xs}}none{{/xs}}' context:{xs:['a']}} Template.render) Assert.equal end
+  "off"   ({engine:'mustache' source:'{{^ok}}off{{/ok}}' context:{ok:false}} Template.render) Assert.equal end
+] "inverted-section" Test.test
+
+
+# --- nested sections --------------------------------------------------
+
+[
+  "Ada: x y "
+    ({engine:'mustache'
+      source:'{{#u}}{{name}}: {{#likes}}{{.}} {{/likes}}{{/u}}'
+      context:{u:{name:'Ada' likes:['x' 'y']}}} Template.render) Assert.equal end
+] "nested-sections" Test.test
+
+
+# --- comments render nothing ----------------------------------------
+
+[
+  "ab" ({engine:'mustache' source:'a{{! this is a comment }}b' context:{}} Template.render) Assert.equal end
+] "comments" Test.test
+
+
+# --- two-step compile renders many contexts -------------------------
+
+[
+  def tpl ({engine:'mustache' source:'<{{v}}>'} Template.compile)
+  "mustache" tpl.engine Assert.equal end
+  "<1>" (tpl Template.render {v:1}) Assert.equal end
+  "<2>" (tpl Template.render {v:2}) Assert.equal end
+] "two-step-reuse" Test.test
+
+
+# --- compile validates its arguments --------------------------------
+
+[
+  def e1 (do [{engine:'mustache'} Template.compile])
+  bad_input/q (e1 get "code") Assert.equal end
+  def e2 (do [{source:'x'} Template.compile])
+  bad_input/q (e2 get "code") Assert.equal end
+] "compile-validates-input" Test.test
+
+
+# --- an unknown engine is rejected ----------------------------------
+
+[
+  def e (do [{engine:'erb' source:'x' context:{}} Template.render])
+  unknown_engine/q (e get "code") Assert.equal end
+] "unknown-engine" Test.test
+
+
+# --- malformed templates raise ---------------------------------------
+
+[
+  [{engine:'mustache' source:'a {{b' context:{}} Template.render] Assert.throws end
+  def e1 (do [{engine:'mustache' source:'{{#a}}x{{/b}}' context:{}} Template.render])
+  template_syntax/q (e1 get "code") Assert.equal end
+  def e2 (do [{engine:'mustache' source:'{{#a}}x' context:{}} Template.render])
+  template_syntax/q (e2 get "code") Assert.equal end
+  def e3 (do [{engine:'mustache' source:'x{{/a}}' context:{}} Template.render])
+  template_syntax/q (e3 get "code") Assert.equal end
+] "malformed-raises" Test.test
+
+
+# --- summary -------------------------------------------------------
+
+print ("---")
+print (`fail count: ${(Test.fail-count)}`)
+0 (Test.fail-count) Assert.equal end
+print ("all green")

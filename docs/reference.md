@@ -1,254 +1,199 @@
 # Reference
 
-Technical description of the `bloom-filter` module's public surface.
-This page is information-oriented: it states what each word is, its
-stack signature, and what it returns. For *why* the filter behaves the
-way it does, see [Explanation](explanation.md); for goal-directed
-recipes, see the [How-to guides](how-to.md).
+Technical description of the `Template` module's public surface. This page
+is information-oriented: what each word is, its call shape, and what it
+returns. For *why* it behaves this way, see the
+[Explanation](explanation.md); for goal-directed recipes, the
+[How-to guides](how-to.md).
 
 > **AI agents:** [AGENTS.md](../AGENTS.md) condenses the calling
 > convention, idioms, and common mistakes for machine use.
 
-The module exports a single namespace, `Bloom`, plus the `BloomFilter`
+The module exports a single namespace, `Template`, plus the `Compiled`
 type. Import it with:
 
 ```aql
-import "./bloom.aql"
+import "./template.aql"
 ```
 
-(No `end` is required after `import` on the pinned build; a trailing
-`end` is harmless.) A consuming script does **not** need to import
-`aql:math-util`, `aql:array-util`, `aql:bin-util`, or `aql:struct-util`
-itself — `bloom.aql` imports them internally.
+A consuming script does **not** need to import `aql:parse`,
+`aql:parselang`, `aql:string-util`, or `aql:vm` — `template.aql` imports
+them internally.
 
 ---
 
 ## Calling convention
 
-Every operation is a forward-dispatched word and must be terminated
-with `end` (or wrapped in parentheses) at the call site, e.g.
-`bf Bloom.add "x" end` or `(bf Bloom.add "x")`. Without a terminator
-the word collects the following token as an argument. This is general
-AQL forward-precedence behaviour, not specific to this module.
-
-Argument order follows the AQL rule "first signature parameter is the
-top of the stack". The call-site columns below show the natural
-left-to-right order to write.
+Every operation is a receiver-first, arguments-forward word:
+`receiver Template.verb arg`. Group a call in parens to use its result as a
+value (`(tpl Template.render ctx)`). The receiver (the data) comes first;
+there is no `Template.verb(args)` and no `tpl.render(ctx)`.
 
 ---
 
 ## Types
 
-### `BloomFilter`
+### `Compiled`
 
-A sealed `class` instance — the filter. Fields:
+A sealed `class` instance produced by `Template.compile`. Fields:
 
-| Field   | Type     | Meaning                                            |
-|---------|----------|----------------------------------------------------|
-| `n`     | Integer  | Target capacity (expected number of distinct items)|
-| `p`     | Float    | Target false-positive probability                  |
-| `m`     | Integer  | Derived bit-array width                             |
-| `k`     | Integer  | Derived number of hash functions                   |
-| `added` | Integer  | Count of `add` calls made against this filter      |
-| `bits`  | Array    | Packed bit storage — 63 bits per integer word      |
+| Field     | Type   | Meaning                                              |
+|-----------|--------|-----------------------------------------------------|
+| `engine`  | String | the engine this template was compiled for           |
+| `program` | String | the generated AQL program run in the sandbox        |
 
-Instances are created only through `Bloom.make`. Treat the fields as
-read-only; mutate exclusively through the namespace words. (The class
-is sealed and strictly typed, so writing an unknown field or a
-mis-typed value is a loud error.)
-
-`bits` is internal: an `Array` of `ceil(m / 63)` integer words, bit
-`i` living at bit `i mod 63` of word `i div 63`. Bit 63 (the sign
-bit) is never used, so every word stays a plain non-negative Integer.
+Construct only through `Template.compile`; treat the fields as read-only.
 
 ---
 
 ## Words
 
-### `Bloom.make`
+### `Template.compile`
 
-Construct a filter sized for a target capacity and false-positive rate.
+Parse and compile a template once.
 
 | | |
 |--|--|
-| **Call**    | `{n: Integer, p: Float} Bloom.make end` |
-| **Stack in**| an options Map with keys `n` and `p` |
-| **Returns** | `BloomFilter` |
-| **Errors**  | raises `bad_input` when `n` is not an Integer ≥ 1 or `p` is not a Float in `(0, 0.5]` |
-
-`m` and `k` are derived from `n` and `p` (see
-[Explanation §Sizing](explanation.md#sizing-the-filter)). The bounds
-are enforced: a `p` above `0.5` would round `k` toward `0`, so it is
-rejected rather than accepted uselessly.
+| **Call**    | `{engine: String, source: String} Template.compile` |
+| **Stack in**| an options Map with keys `engine` and `source` |
+| **Returns** | `Compiled` |
+| **Errors**  | `bad_input` if `engine`/`source` are missing or not Strings; `unknown_engine` if the engine is not implemented |
 
 ```aql
-def bf ({n: 1000, p: 0.01} Bloom.make end)
-print ((bf Bloom.params end)) end
-# => {k:7 m:9586 n:1000 p:0.01}
+def tpl ({engine:'mustache' source:'Hi {{name}}!'} Template.compile)
 ```
 
-### `Bloom.add`
+### `Template.render`
 
-Insert an item. Any value is accepted; it is stringified internally
-before hashing.
-
-| | |
-|--|--|
-| **Call**    | `bf Bloom.add item end` |
-| **Stack in**| `BloomFilter`, then the item (`Any`) |
-| **Returns** | the same `BloomFilter`, mutated in place |
-| **Effect**  | sets `k` bits; increments `added` by 1 |
-
-`add` mutates the filter it is given and also returns it, so the
-return value and the argument are the same object. Adding the same
-item twice sets no new bits but still increments `added`.
-
-### `Bloom.contains`
-
-Test membership.
+Render a template against a context. Two forms:
 
 | | |
 |--|--|
-| **Call**    | `bf Bloom.contains item end` |
-| **Stack in**| `BloomFilter`, then the item (`Any`) |
-| **Returns** | `Boolean` |
-
-`false` means the item was **definitely never added**. `true` means
-the item was **probably added** — it may be a false positive at
-approximately rate `p`. There are no false negatives. See
-[Explanation §No false negatives](explanation.md#why-there-are-no-false-negatives).
-
-```aql
-def _ (bf Bloom.add "alice" end)
-print ((bf Bloom.contains "alice" end)) end   # => true
-print ((bf Bloom.contains "carol" end)) end   # => false
-```
-
-### `Bloom.count`
-
-Estimate the number of distinct items added.
-
-| | |
-|--|--|
-| **Call**    | `bf Bloom.count end` |
-| **Stack in**| `BloomFilter` |
-| **Returns** | `Integer` (estimate) |
-
-Uses the Swamidass–Baldi estimator over the set-bit population, with a
-guard that returns the exact `added` count when every bit is set. The
-result is an **approximation** and typically drifts below the true
-insert count as the filter fills. An empty filter counts `0`. Cost is
-one native popcount per 63-bit word — `O(m/63)`.
-
-### `Bloom.params`
-
-Return the filter's parameters as a Map.
-
-| | |
-|--|--|
-| **Call**    | `bf Bloom.params end` |
-| **Stack in**| `BloomFilter` |
-| **Returns** | `Map` with keys `n`, `p`, `m`, `k` |
-
-```aql
-def ps (bf Bloom.params end)
-print ((ps "m" get)) end   # => 9586
-```
-
-### `Bloom.merge`
-
-Union two filters into the first.
-
-| | |
-|--|--|
-| **Call**    | `a Bloom.merge b end` |
-| **Stack in**| target `BloomFilter` `a`, then source `BloomFilter` `b` |
-| **Returns** | `a`, now containing every bit that was set in `a` or `b` |
-| **Effect**  | mutates `a` in place; `b` is unchanged; `a.added` becomes `a.added + b.added` |
-| **Errors**  | raises `incompatible_merge` if `a` and `b` differ on `m` or `k` |
-
-Both filters must have identical `m` and `k`, which happens
-automatically when both were built with the same `(n, p)`. After a
-merge, every item present in `a` or `b` reads as contained. The union
-itself is one bitwise OR per 63-bit word.
-
-The error message names the mismatched parameter and both values, e.g.
-`Bloom.merge: filters disagree on m (9586 vs 4793); build both with
-the same (n, p)`. Trap it with `do […] error […]` (read `e get code` /
-`e get message`) or assert it with `Assert.throws`.
-
-### `Bloom.encode`
-
-Serialize the filter to a jsonic-style string snapshot.
-
-| | |
-|--|--|
-| **Call**    | `bf Bloom.encode end` |
-| **Stack in**| `BloomFilter` |
+| **Call (two-step)** | `compiled Template.render context` |
+| **Call (one-shot)** | `{engine, source, context} Template.render` |
+| **Stack in**| a `Compiled` + a context value, **or** an options Map |
 | **Returns** | `String` |
+| **Errors**  | `template_syntax` for a malformed template (one-shot also raises `bad_input` / `unknown_engine` from the implicit compile) |
 
-The string carries `n`, `p`, `m`, `k`, `added`, and the sorted list of
-set bit indices. Cost is `O(m)`.
+The context is any value; usually a Map of the fields the template
+references. The render runs in a sandboxed sub-engine (see
+[Explanation](explanation.md)).
 
 ```aql
-print ((bf Bloom.encode end)) end
-# => {added:1 k:7 m:9586 n:1000 p:0.01 set:[223 1110 2827 3714 4601 6318 7205]}
+print (tpl Template.render {name:'Ada'})
+print ({engine:'liquid' source:'{{ x | upcase }}' context:{x:'hi'}} Template.render)
 ```
 
-The snapshot round-trips through `Bloom.decode`. (Exact bit indices
-depend on the module's hash functions, so snapshots are portable
-across processes running the *same* module version, not across
-versions that changed the hashing.)
+### `Template.engines`
 
-### `Bloom.decode`
-
-Rebuild a filter from a `Bloom.encode` snapshot.
+The engines this build implements.
 
 | | |
 |--|--|
-| **Call**    | `text Bloom.decode end` |
-| **Stack in**| the snapshot `String` |
-| **Returns** | a fresh `BloomFilter` |
-| **Errors**  | raises `bad_payload` when the text is not parseable jsonic or lacks the required fields |
+| **Call**    | `Template.engines` |
+| **Returns** | `List` — `['mustache' 'handlebars' 'liquid' 'jinja']` |
 
-The payload's own `m` and `k` are trusted (not re-derived from `n` and
-`p`), so a snapshot survives changes to the sizing formulas. The
-rebuilt filter is independent of the original — mutating one does not
-affect the other.
+---
 
-```aql
-def snap (bf Bloom.encode end)
-def back (snap Bloom.decode end)
-print ((back Bloom.contains "alice" end)) end   # => true
-```
+## Engines and features
+
+All engines share dotted lookups (`a.b.c`), the `{{ }}` output delimiter,
+and identical context data. **Escaping:** mustache and handlebars
+HTML-escape `{{x}}` (`& < > "`), with `{{{x}}}` / `{{& x}}` raw; liquid and
+jinja are raw by default (use the `escape` filter).
+
+### mustache
+
+| Construct | Meaning |
+|-----------|---------|
+| `{{name}}` | escaped interpolation |
+| `{{{name}}}`, `{{& name}}` | raw interpolation |
+| `{{#s}}…{{/s}}` | section: list iteration (`{{.}}` = item), map context, or truthy scalar |
+| `{{^s}}…{{/s}}` | inverted section (renders iff falsy/empty) |
+| `{{! comment }}` | comment (renders nothing) |
+| `{{a.b.c}}`, `{{.}}` | dotted lookup, implicit current item |
+
+### handlebars
+
+Mustache lexer + block helpers:
+
+| Construct | Meaning |
+|-----------|---------|
+| `{{#if x}}…{{else}}…{{/if}}` | conditional on truthiness of `x` |
+| `{{#unless x}}…{{/unless}}` | negated conditional |
+| `{{#each xs}}…{{/each}}` | iterate; `{{this}}`, `{{@index}}`, `{{@first}}`, `{{@last}}`, item fields, `{{else}}` for empty |
+| `{{#with obj}}…{{/with}}` | enter an object's fields (merged onto the context) |
+
+A `{{#name}}` whose first word is not a helper falls back to a mustache
+section.
+
+### liquid
+
+`{{ output }}` + `{% tags %}`:
+
+| Construct | Meaning |
+|-----------|---------|
+| `{{ x \| f: a }}` | output through a filter chain |
+| `{% if c %}…{% elsif c %}…{% else %}…{% endif %}` | conditional chain |
+| `{% unless c %}…{% endunless %}` | negated conditional |
+| `{% for x in xs %}…{% else %}…{% endfor %}` | loop; `forloop.{index,index0,first,last,length,rindex}` |
+| `{% assign v = expr %}` | bind a variable for the rest of the block |
+| `{% comment %}…{% endcomment %}` | block comment |
+
+Conditions: `== != < > <= >=`, joined by `and` / `or`.
+
+### jinja
+
+`{{ }}` + `{% %}` + `{# comments #}`:
+
+| Construct | Meaning |
+|-----------|---------|
+| `{{ x \| f }}` | output through a filter chain |
+| `{% if c %}…{% elif c %}…{% else %}…{% endif %}` | conditional chain |
+| `{% for x in xs %}…{% else %}…{% endfor %}` | loop; `loop.{index,index0,first,last,length,rindex}` |
+| `{% set v = expr %}` | bind a variable for the rest of the block |
+| `{# … #}` | comment (lexer-level) |
+
+### Built-in filters (liquid / jinja)
+
+`upcase`/`upper`, `downcase`/`lower`, `capitalize`, `size`/`length`,
+`first`, `last`, `join` (arg = separator), `default` (arg = fallback),
+`append` (arg), `prepend` (arg), `replace` (args = find, repl), `escape`,
+`strip`/`trim`. An unknown filter passes the value through unchanged.
+
+### Not implemented (any engine)
+
+Partials / includes, template inheritance, custom helpers / filters,
+set-delimiter tags, lambdas, and **parent-context fallback in
+mustache/handlebars sections** (liquid/jinja `for` and handlebars
+`each`/`with` *do* see the surrounding context, since they merge it).
+Filter arguments are literals or paths; commas inside quotes are handled,
+but a pipe inside a quoted argument is not.
 
 ---
 
 ## Errors at a glance
 
-All failures raise coded errors; catch with `do […] error […]` and
-read `e get code` / `e get message` (dispatch on several codes with
-`case`).
+All failures raise coded errors; catch with `do […] error […]` and read
+`(e get "code")` / `(e get "message")` (a **quoted** key — `get` evaluates
+its argument on this build).
 
 | Code | Raised by | Situation |
 |------|-----------|-----------|
-| `bad_input` | `make` | `n` not an Integer ≥ 1, or `p` not a Float in `(0, 0.5]` |
-| `incompatible_merge` | `merge` | the filters disagree on `m` or `k` |
-| `bad_payload` | `decode` | text is not parseable jsonic, or is missing/mis-typing `n p m k added set` |
+| `bad_input` | `compile` / `render` | `engine` or `source` missing or not a String |
+| `unknown_engine` | `compile` / `render` | the requested engine is not implemented |
+| `template_syntax` | `compile` / `render` | malformed template: unbalanced, mismatched, or unclosed tag; unsupported `{% tag %}` |
+| `parse_syntax_error` | the parser | a tag with no closing delimiter (`{{`/`{%`/`{#` never closed) |
 
-A missing `end` after a `Bloom.*` call is not a module error but a
-general AQL dispatch problem — the word collects the following token
-(add `end` or parens).
+---
 
-## Complexity
+## Sandbox guarantees
 
-| Word       | Cost      |
-|------------|-----------|
-| `make`     | `O(m/63)` (allocates the word Array) |
-| `add`      | `O(k)`    |
-| `contains` | `O(k)`    |
-| `count`    | `O(m/63)` |
-| `params`   | `O(1)`    |
-| `merge`    | `O(m/63)` |
-| `encode`   | `O(m)`    |
-| `decode`   | `O(m/63 + s)` for `s` set bits |
+Every render runs in a fresh `aql:vm` sub-engine under a policy that
+**uninstalls** the network, fileops, process, env, and sqlite capability
+scopes and allows only the import of `aql:string-util`. A template
+therefore cannot perform I/O or escape the sandbox. The policy also
+declares step/time/output limits; note that the current `aql:vm` build
+does **not** enforce the step/time limits (see
+[dx-report.md](../dx-report.md) §5) — capability isolation is the operative
+guarantee, and a template cannot express unbounded computation anyway.

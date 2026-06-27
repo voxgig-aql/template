@@ -23,14 +23,14 @@
 # is blocked.
 set -uo pipefail
 
-# aql-lang/aql @ main, 2026-06-24 (PR #182, claude/aql-client-issues-6b8new) —
-# the same commit the library now pins. It fixes the two regressions this
-# library's aql-backend-report.md flagged — the None/type-literal
-# template-interpolation break (f247557) and the `convert` return-type /
-# fold-carrier `no_signature` check false positives (f247557 / fc47452) — plus
-# OpInterp (1b7b9ae) and gradual-Any. All five suites interpret, check (0
-# errors), and compile clean. Bump in lockstep with the workflow AQL_REF.
-AQL_BYTECODE_REF=407fedad2ea2b30c3dde2f29cfbe60e55f94db4e
+# aql-lang/aql @ latest main — the same commit the library pins. Each test
+# SUITE interprets cleanly, checks with 0 errors (only advisory unused_def
+# warnings), and compiles byte-identically. NOTE: the module file
+# template.aql checked ALONE is not check-clean — runtime-registered parsers
+# are invisible to static analysis (see dx-report.md §11) — but the suites,
+# which exercise the words through concrete calls, are. Bump in lockstep with
+# the workflow AQL_REF.
+AQL_BYTECODE_REF=b849948a596ddba5c72faf7fcd7a57b585daa9f0
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
@@ -38,11 +38,14 @@ CACHE="$HOME/.cache/aql-divergence"
 AQL="$CACHE/aql-$AQL_BYTECODE_REF"
 
 SUITES="
-test/bloom_unit_test.aql
-test/bloom_unit_spec.aql
-test/bloom_prop_test.aql
-test/bloom_prop_spec.aql
-test/bloom_smoke_test.aql
+test/template_unit_test.aql
+test/template_unit_spec.aql
+test/template_prop_test.aql
+test/template_prop_spec.aql
+test/template_smoke_test.aql
+test/handlebars_unit_test.aql
+test/liquid_unit_test.aql
+test/jinja_unit_test.aql
 "
 
 log() { echo "[divergence] $*"; }

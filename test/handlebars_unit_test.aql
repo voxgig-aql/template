@@ -1,0 +1,83 @@
+# handlebars engine unit tests (aql:test imperative API).
+#
+# Handlebars reuses the mustache {{ }} lexer and adds the block helpers
+# if / unless / each / with, the {{else}} clause, and path/literal
+# arguments. Escaped {{x}} / unescaped {{{x}}} interpolation is inherited.
+#
+# Run:
+#   aql test/handlebars_unit_test.aql
+
+
+import "aql:test"
+import "./template.aql"
+
+def hb fn [ [src:String ctx:Any] [String] [
+  {engine:'handlebars' source:src context:ctx} Template.render
+] ]
+
+
+# --- interpolation (escaped / unescaped) ----------------------------
+
+[
+  "Hi Ada!" (hb "Hi {{name}}!" {name:'Ada'}) Assert.equal end
+  "&lt;b&gt;" (hb "{{h}}" {h:'<b>'}) Assert.equal end
+  "<b>" (hb "{{{h}}}" {h:'<b>'}) Assert.equal end
+] "interpolation" Test.test
+
+
+# --- {{#if}} / {{else}} ---------------------------------------------
+
+[
+  "yes" (hb "{{#if ok}}yes{{else}}no{{/if}}" {ok:true}) Assert.equal end
+  "no"  (hb "{{#if ok}}yes{{else}}no{{/if}}" {ok:false}) Assert.equal end
+  ""    (hb "{{#if ok}}yes{{/if}}" {ok:false}) Assert.equal end
+] "if-else" Test.test
+
+
+# --- {{#unless}} -----------------------------------------------------
+
+[
+  "no" (hb "{{#unless ok}}no{{/unless}}" {ok:false}) Assert.equal end
+  ""   (hb "{{#unless ok}}no{{/unless}}" {ok:true}) Assert.equal end
+] "unless" Test.test
+
+
+# --- {{#each}} with this / @index / fields --------------------------
+
+[
+  "[a][b]" (hb "{{#each xs}}[{{this}}]{{/each}}" {xs:['a' 'b']}) Assert.equal end
+  "0:A 1:B " (hb "{{#each xs}}{{@index}}:{{name}} {{/each}}" {xs:[{name:'A'} {name:'B'}]}) Assert.equal end
+  "empty" (hb "{{#each xs}}x{{else}}empty{{/each}}" {xs:[]}) Assert.equal end
+] "each" Test.test
+
+
+# --- {{#with}} -------------------------------------------------------
+
+[
+  "Ada" (hb "{{#with u}}{{name}}{{/with}}" {u:{name:'Ada'}}) Assert.equal end
+] "with" Test.test
+
+
+# --- nested blocks ---------------------------------------------------
+
+[
+  "[1][3]"
+    (hb "{{#each xs}}{{#if on}}[{{v}}]{{/if}}{{/each}}"
+        {xs:[{on:true v:1} {on:false v:2} {on:true v:3}]}) Assert.equal end
+] "nested" Test.test
+
+
+# --- malformed: mismatched close raises -----------------------------
+
+[
+  def e (do [(hb "{{#if a}}x{{/each}}" {a:true})])
+  template_syntax/q (e get "code") Assert.equal end
+] "mismatch-raises" Test.test
+
+
+# --- summary -------------------------------------------------------
+
+print ("---")
+print (`fail count: ${(Test.fail-count)}`)
+0 (Test.fail-count) Assert.equal end
+print ("all green")

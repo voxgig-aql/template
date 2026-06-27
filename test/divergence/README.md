@@ -23,79 +23,49 @@ failures.
 test/divergence/run.sh
 ```
 
-`run.sh` builds its own aql at a ref pinned in the script (the same `407feda`
-the library now pins; pinning it here keeps the harness self-contained, so it
-never depends on whatever aql is on `PATH`), then prints a per-suite matrix:
+`run.sh` builds its own aql at a ref pinned in the script (the same
+`b849948` the library pins; pinning it here keeps the harness
+self-contained, so it never depends on whatever aql is on `PATH`), then
+prints a per-suite matrix:
 
 ```
   SUITE                         INTERPRETER   CHECK           BYTECODE
-  bloom_unit_test.aql           ok            ok              ok
-  bloom_unit_spec.aql           ok            ok              ok
-  bloom_prop_test.aql           ok            ok              ok
-  bloom_prop_spec.aql           ok            ok              ok
-  bloom_smoke_test.aql          ok            ok              ok
+  template_unit_test.aql           ok            ok              ok
+  template_unit_spec.aql           ok            ok              ok
+  ...
+  jinja_unit_test.aql              ok            ok              ok
 ```
 
 It exits non-zero on any interpreter failure, any check **error**, or any
-difference between `aql --compile X` and `aql X`. Needs `go` + network for the
-one-time build (cached in `~/.cache/aql-divergence`).
+difference between `aql --compile X` and `aql X`. Needs `go` + network for
+the one-time build (cached in `~/.cache/aql-divergence`).
 
-## Background: what this guards against (and the bug it caught)
+## What this guards — and an important scoping note
 
-`aql --compile` is documented to return results identical to the interpreter
-(it falls back to the interpreter for anything it can't lower). This harness
-exists because that promise has been broken before, and broke again twice on
-`main` (the regressions in `../../aql-backend-report.md`).
+The contract under test is the byte compiler's promise: `aql --compile X`
+returns results **identical** to `aql X` (it falls back to the interpreter
+for anything it can't lower). For this module that holds — every suite is
+byte-identical between the two surfaces.
 
-The original divergence this guard caught: a compiled `each` body **dropped a
-block-local binding** from the enclosing block —
+The harness checks the **test suites**, not `template.aql` directly, and
+that distinction matters:
 
-```aql
-import "aql:test" end
-import "./bloom.aql" end
-[ def bf ({n: 1000, p: 0.01} Bloom.make end)
-  def _ (iota 50 each [ var [[i] bf Bloom.add (convert String i) end 0 ] ])
-  def cnt (bf Bloom.count end)
-  true (45 lte cnt) Assert.equal end
-] "count" Test.test end
-# interpreter => passes
-# --compile (on the old pin) => each: element 0: undefined word: bf
-```
+- Checked **through a suite** — where the engines' words run with concrete
+  values — `aql check` reports **0 errors** (only advisory `unused_def`
+  warnings), so the gate passes.
+- Checked **alone**, `aql check template.aql` reports errors. They are
+  *not* real defects: the engines register their grammars as a **runtime**
+  side effect (`Parse.register`), which a static pass cannot see, so the
+  `lex-*` words' `parse <engine>` calls look unresolved; dynamic dispatch
+  and the mutually-recursive compiler helpers defeat the checker's flow
+  analysis too. A function that errors in-module checks clean in isolation
+  — the failures are emergent from whole-module analysis. See
+  [`../../dx-report.md`](../../dx-report.md) §11–13 for the full audit.
 
-— so `bf Bloom.add …` raised `undefined word: bf` and, because the emitter
-believed it could lower the body, `--compile` did **not** fall back and the
-wrong result escaped. `test/bloom_unit_test.aql` was restructured to build
-its bulk fixture (`_seen`) at **top level** instead of inside the `Test.test`
-block, which both keeps it in scope for the compiler and (the underscore)
-skips `aql check`'s unused_def false positive for body-only defs.
+Consequently `aql --force-compile` (strict bytecode) refuses on those
+check diagnostics and falls back; non-strict `--compile` compiles-or-falls-
+back and stays byte-identical, which is what this harness gates on.
 
-**Status (aql `407feda`, the current pin): fixed upstream.** The reduced
-repro above is now byte-identical between interpreter and `--compile`, and
-all five suites are clean across all three surfaces. The `_seen` fixture is
-kept anyway — it's harmless and keeps the suite robust on older builds. This
-harness stays as the regression guard (it has already caught two transient
-`main` regressions; see `../../aql-backend-report.md`).
-
-`--force-compile` now fully compiles `bloom_prop_test.aql`; the rest refuse
-on code-body words (`each` / `do` / `test-test`, "Stage 2") and fall back
-cleanly under `--compile` — sound by `aql-lang/aql`'s
-`design/COMPILABLE-SUBSET.md` ("refusal is always sound; the worst failure
-mode is slow, not wrong").
-
-### Wiring it into CI
-
-`run.sh` is self-contained, so a gating job is one block (add it to
-`.github/workflows/test.yml` — needs a token with `workflow` scope, which the
-agent session that wrote this didn't have):
-
-```yaml
-  divergence:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-      - name: interpreter / check / byte-compiler agreement
-        run: test/divergence/run.sh
-```
+This guard has value beyond the static facts: the "compile == interpret"
+promise has been broken by upstream regressions before, and this is the
+cheap, self-contained check that catches a recurrence.

@@ -1,0 +1,119 @@
+# Property-based tests for the template module — DIRECT-CODE FORM.
+#
+# Exercises aql:test's imperative `Test.check-prop` driver directly, with
+# explicit run / seed / shrink counts:
+#
+#   Test.check-prop NAME  [GEN-BODY]  [PROP-BODY]  RUNS  SEED  MAX-SHRINKS
+#
+# The sibling `test/template_prop_spec.aql` covers the same properties
+# through the declarative `PropertySpec` surface. Each render spins up a
+# fresh sandboxed sub-engine (Vm.run-with), so the run budget is kept
+# modest.
+#
+# GEN-BODY leaves one generated value on the stack (with `r` bound to the
+# random source); PROP-BODY takes it and returns a Boolean.
+#
+# Run:
+#   aql test/template_prop_test.aql
+
+
+import "aql:test"
+import "aql:array-util"
+import "aql:string-util"
+import "./template.aql"
+
+
+# Tag-free character set, so generated text never accidentally opens a tag.
+def charset "abcdefghijklmnopqrstuvwxyz0123456789 .,!"
+
+
+# --- P1. Tag-free text passes through unchanged --------------------
+
+Test.check-prop "text-passthrough"
+  [r.string charset 12]
+  [
+    var [[s]
+      s eq ({engine:'mustache' source:s context:{}} Template.render)
+    ]
+  ]
+  12 1 0
+
+
+# --- P2. A variable round-trips its (escape-free) value ------------
+
+Test.check-prop "var-round-trip"
+  [r.string charset 10]
+  [
+    var [[s]
+      s eq ({engine:'mustache' source:'{{v}}' context:{v:s}} Template.render)
+    ]
+  ]
+  12 1 0
+
+
+# --- P3. Escaping neutralises angle brackets -----------------------
+#
+# For any value wrapped in <…>, the escaped output contains the entity
+# forms and never a raw '<'.
+
+Test.check-prop "escaping-removes-brackets"
+  [r.string charset 6]
+  [
+    var [[s]
+      def payload (StringUtil.concat ["<" s ">"])
+      def out ({engine:'mustache' source:'{{v}}' context:{v:payload}} Template.render)
+      def no-raw ((StringUtil.indexof "<" out) lt 0)
+      def has-lt ((StringUtil.indexof "&lt;" out) gte 0)
+      no-raw and has-lt
+    ]
+  ]
+  12 1 0
+
+
+# --- P4. A list section renders once per element -------------------
+#
+# `{{#xs}}.{{/xs}}` over a list of N items produces exactly N dots.
+
+Test.check-prop "section-iterates-n-times"
+  [r.int 0 12]
+  [
+    var [[n]
+      def xs (iota n each [ var [[i] "x" ] ])
+      def out ({engine:'mustache' source:'{{#xs}}.{{/xs}}' context:{xs:xs}} Template.render)
+      (out size) eq n
+    ]
+  ]
+  12 1 0
+
+
+# --- P5. Two-step compile agrees with one-shot render --------------
+
+Test.check-prop "compile-equals-oneshot"
+  [r.string charset 8]
+  [
+    var [[s]
+      def tpl ({engine:'mustache' source:'[{{v}}]'} Template.compile)
+      def two-step (tpl Template.render {v:s})
+      def one-shot ({engine:'mustache' source:'[{{v}}]' context:{v:s}} Template.render)
+      two-step eq one-shot
+    ]
+  ]
+  12 1 0
+
+
+# --- summary -------------------------------------------------------
+
+print ("---")
+def all-results (Test.results)
+def _print (all-results each [
+  var [[r]
+    def nm (r get "name")
+    def ok (r get "ok")
+    if ok [ print (`  pass: ${nm}`) ] [ print (`  FAIL: ${nm}  failing-input=${(r get "failing-input")}`) ]
+    0
+  ]
+])
+print ("---")
+print (`fail count: ${(Test.fail-count)}`)
+0 (Test.fail-count) Assert.equal end
+print ("all green")

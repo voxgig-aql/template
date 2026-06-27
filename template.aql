@@ -1,0 +1,822 @@
+# template: sandboxed templating languages in AQL.
+#
+# Public surface (the Template namespace exported at the bottom):
+#
+#   {engine:String, source:String} Template.compile  → Compiled
+#   compiled Template.render context                  → String
+#   {engine, source, context} Template.render         → String  (one-shot)
+#   Template.engines                                  → List    (available engines)
+#
+# A template string is turned into output through a three-stage pipeline,
+# the same for every engine:
+#
+#   1. PARSE   — `aql:parse` defines the template grammar. A custom lex
+#                matcher (the lexer) segments the source into a typed
+#                token stream and a declarative `Parse.rule` recognizes
+#                it, registered as a `parse <engine>` kind.
+#   2. COMPILE — the token stream is lowered to an AQL program: a fixed
+#                runtime prelude of custom `tpl_*` words plus a `__render`
+#                function that builds the output by calling only those
+#                words.
+#   3. RUN     — the program is executed through `aql:vm` in a fresh
+#                sub-engine under a totally restricted policy: every
+#                capability scope (network, fileops, process, env, sqlite)
+#                is uninstalled and only the template runtime is reachable,
+#                with step/time/output limits. A template therefore cannot
+#                perform I/O, escape the sandbox, or run unbounded — the
+#                strongest isolation aql offers.
+#
+# Engines: `mustache` is implemented end-to-end. `handlebars`, `liquid`
+# and `jinja` share this spine (lexer + recognizer + compiler + runtime +
+# sandbox) and are registered as future engines; selecting one today
+# raises `unknown_engine` until its grammar/semantics land.
+#
+# Failures raise coded errors (catch with `do […] error […]`, read
+# `e get code` / `e get message` in the handler):
+#
+#   bad_input        Template.compile/render arguments missing or wrong type
+#   unknown_engine   the requested engine is not implemented
+#   template_syntax  the template is malformed (unterminated or unbalanced tag)
+#
+# Calling convention: the receiver/data comes first, then the verb, then
+# any extra arguments — `compiled Template.render context`. Group a call in
+# parens to use its result as a value.
+#
+# Imported via `import "./template.aql"`; the importing script need not
+# pre-import the `aql:*` modules this file uses (parse, parselang,
+# string-util, vm) — they are imported here.
+
+
+import "aql:parse"
+import "aql:parselang"
+import "aql:string-util"
+import "aql:vm"
+
+
+# --- type -----------------------------------------------------------
+#
+# A compiled template: the engine it was built for plus the AQL program
+# (runtime prelude + `__render` fn) that renders it. `render` appends the
+# per-call context and runs the whole thing in the sandbox. Treat the
+# fields as read-only; build only through `Template.compile`.
+
+def Compiled class {
+  engine:  String
+  program: String
+}
+
+
+# --- sandbox policy -------------------------------------------------
+#
+# The policy handed to `Vm.run-with` for every render. It denies all the
+# coarse capabilities outright (network / fileops / process / env / sqlite
+# are uninstalled, so the words don't even exist in the sub-engine) and
+# allows only `mutate` (the runtime builds output in a local buffer) plus
+# the import of `aql:string-util` (pure string computation the runtime
+# needs — concat / replace / split). Resource limits bound a runaway or
+# hostile template. This is the "totally restricted registry": nothing
+# outside the template runtime vocabulary can be reached.
+
+def tpl-sandbox {
+  version: 1
+  name:    "template"
+  limits: {
+    timeoutMs:      5000
+    maxStepBudget:  5000000
+    maxStackDepth:  1024
+    maxOutputBytes: 8000000
+  }
+  scopes: {
+    global: {
+      words: { default: "deny" rules: [ { allow: ["mutate"] } ] }
+    }
+    engine: { words: { default: "allow" } }
+    modules: {
+      words: {
+        default: "deny"
+        rules: [ { allow: ["import"] where: { module: ["aql:string-util"] } } ]
+      }
+      scopes: {
+        "aql:string-util": { words: { default: "allow" } }
+      }
+    }
+    fileops: { install: false }
+    network: { install: false }
+    sqlite:  { install: false }
+    process: { install: false }
+    env:     { install: false }
+  }
+}
+
+
+# --- runtime prelude ------------------------------------------------
+#
+# The custom secword set the compiled body is built from. Emitted as the
+# head of every program and run inside the sandbox. Every secword is pure
+# (value-returning) — AQL traces a void-return fn body once at definition,
+# so the runtime avoids captured mutation and returns Strings instead.
+#
+#   tpl_str v            stringify (None → "")
+#   tpl_esc v            HTML-escape the stringified value
+#   tpl_truthy v         mustache truthiness (None/false/""/[] are falsy)
+#   tpl_lookup path cx   resolve a dotted name (or "." = current) in cx
+#   tpl_section v cx fn  render a section: iterate a list, recurse into a
+#                        map, render once for a truthy scalar, else ""
+#   tpl_inverted v cx fn render the body once iff v is falsy
+#
+# The quote character for escaping is written `"\""` — inside this
+# backtick string a `\"` stays literal, yielding valid AQL source.
+
+def tpl-runtime `import "aql:string-util"
+def __none None
+def tpl_str fn [ [v:Any] [String] [ if (v is None) [""] [(convert String v)] ] ]
+def tpl_esc fn [ [v:Any] [String] [
+  def s (tpl_str v)
+  def a (StringUtil.replace "&" "&amp;" s {scope:'all'})
+  def b (StringUtil.replace "<" "&lt;" a {scope:'all'})
+  def c (StringUtil.replace ">" "&gt;" b {scope:'all'})
+  StringUtil.replace "\"" "&quot;" c {scope:'all'}
+] ]
+def tpl_truthy fn [ [v:Any] [Boolean] [
+  if (v is None) [false] [
+  if (v is Boolean) [v] [
+  if (v is List) [((v size) gt 0)] [
+  if (v is String) [((v size) gt 0)] [true]]]]
+] ]
+def tpl_lookup fn [ [path:String cx:Any] [Any] [
+  if (path eq ".") [cx] [
+    def segs (StringUtil.split "." path)
+    (cx segs [ var [[seg cur] (if (cur is Map) [(cur get (seg))] [__none]) ] ] fold)
+  ]
+] ]
+def tpl_size fn [ [v:Any] [Integer] [
+  if (v is List) [(v size)] [ if (v is String) [(v size)] [ if (v is Map) [((v keys) size)] [0] ] ]
+] ]
+def tpl_set fn [ [m:Any k:String v:Any] [Map] [
+  def bse (if (m is Map) [m] [{}])
+  bse set (k) v
+] ]
+def tpl_merge fn [ [a:Any b:Any] [Map] [
+  def ma (if (a is Map) [a] [{}])
+  def mb (if (b is Map) [b] [{}])
+  (ma (mb keys) [ var [[key acc] (acc set (key) (mb get (key))) ] ] fold)
+] ]
+# section: list -> iterate (else when empty); map -> enter; truthy scalar ->
+# render once; falsy -> else.
+def tpl_section fn [ [v:Any cx:Any body:Function elsf:Function] [String] [
+  if (v is List)
+    [ if ((v size) eq 0) [(elsf cx)] [ (v each [ var [[it] (body it) ] ]) StringUtil.concat ] ]
+    [ if (v is Map) [(body v)] [ if (tpl_truthy v) [(body cx)] [(elsf cx)] ] ]
+] ]
+def tpl_inverted fn [ [v:Any cx:Any body:Function elsf:Function] [String] [
+  if (tpl_truthy v) [(elsf cx)] [(body cx)]
+] ]
+# conditional: pick a body fn by a precomputed Boolean (used by handlebars
+# if/unless and liquid/jinja if/elsif/else).
+def tpl_if fn [ [c:Boolean cx:Any body:Function elsf:Function] [String] [
+  if c [(body cx)] [(elsf cx)]
+] ]
+# handlebars {{#each}}: a map item's fields become the context, plus the
+# magic names this / @index / @first / @last; a falsy/empty list -> else.
+def tpl_each fn [ [items:Any cx:Any body:Function elsf:Function] [String] [
+  if (items is List) [
+    if ((items size) eq 0) [(elsf cx)] [
+      def n (items size)
+      (iota n each [ var [[i]
+        def item (items get (i))
+        def bse (if (item is Map) [item] [{}])
+        def m1 (bse set "this" item)
+        def m2 (m1 set "@index" i)
+        def m3 (m2 set "@first" (i eq 0))
+        def m4 (m3 set "@last" (i eq (n sub 1)))
+        (body m4)
+      ] ]) StringUtil.concat
+    ]
+  ] [ if (tpl_truthy items) [(body items)] [(elsf cx)] ]
+] ]
+# liquid/jinja for: binds the loop var by name and exposes forloop / loop
+# metadata, merged onto the surrounding context; empty/non-list -> else.
+def tpl_for fn [ [items:Any varname:String cx:Any body:Function elsf:Function] [String] [
+  if (items is List) [
+    if ((items size) eq 0) [(elsf cx)] [
+      def n (items size)
+      (iota n each [ var [[i]
+        def item (items get (i))
+        def loopm {index:(i add 1) index0:i first:(i eq 0) last:(i eq (n sub 1)) length:n rindex:(n sub i)}
+        def c1 (if (cx is Map) [cx] [{}])
+        def c2 (c1 set (varname) item)
+        def c3 (c2 set "forloop" loopm)
+        def c4 (c3 set "loop" loopm)
+        (body c4)
+      ] ]) StringUtil.concat
+    ]
+  ] [ (elsf cx) ]
+] ]
+# handlebars {{#with}}: merge an object onto the context for the body.
+def tpl_with fn [ [v:Any cx:Any body:Function] [String] [
+  if (v is Map) [(body (tpl_merge cx v))] [ if (tpl_truthy v) [(body cx)] [""] ]
+] ]
+# liquid/jinja filter application: a small built-in filter library.
+def tpl_filter fn [ [name:String v:Any fargs:List] [Any] [
+  def a0 (if ((fargs size) gt 0) [(fargs get 0)] [__none])
+  if (name eq "upcase")     [(StringUtil.changecase (tpl_str v) {style:'upper'})] [
+  if (name eq "upper")      [(StringUtil.changecase (tpl_str v) {style:'upper'})] [
+  if (name eq "downcase")   [(StringUtil.changecase (tpl_str v) {style:'lower'})] [
+  if (name eq "lower")      [(StringUtil.changecase (tpl_str v) {style:'lower'})] [
+  if (name eq "capitalize") [(StringUtil.changecase (tpl_str v) {style:'capitalize'})] [
+  if (name eq "size")       [(tpl_size v)] [
+  if (name eq "length")     [(tpl_size v)] [
+  if (name eq "first")      [(if (v is List) [(v get 0)] [v])] [
+  if (name eq "last")       [(if (v is List) [(v get ((v size) sub 1))] [v])] [
+  if (name eq "join")       [(if (v is List) [(StringUtil.concat v {sep:(tpl_str a0)})] [(tpl_str v)])] [
+  if (name eq "default")    [(if (tpl_truthy v) [v] [a0])] [
+  if (name eq "append")     [(StringUtil.concat [(tpl_str v) (tpl_str a0)])] [
+  if (name eq "prepend")    [(StringUtil.concat [(tpl_str a0) (tpl_str v)])] [
+  if (name eq "replace")    [(StringUtil.replace (tpl_str a0) (tpl_str (fargs get 1)) (tpl_str v) {scope:'all'})] [
+  if (name eq "escape")     [(tpl_esc v)] [
+  if (name eq "strip")      [(StringUtil.trim (tpl_str v))] [
+  if (name eq "trim")       [(StringUtil.trim (tpl_str v))] [
+    v ]]]]]]]]]]]]]]]]]
+] ]
+`
+
+
+# --- lexer (mustache) -----------------------------------------------
+#
+# `aql:parse` is register-only: a grammar culminates in a `parse <name>`
+# kind. The mustache lexer is a custom `Parse.matcher` (priority 5) that
+# segments the source into typed tokens — text runs and the seven tag
+# kinds — pushing each as a {t,v} map onto `mustache-acc`, and a
+# declarative `Parse.rule` that recognizes the resulting `#TX` stream
+# (push-recursion = "zero or more tokens").
+#
+# Why a matcher and not a pure-ABNF grammar: the structure-first engine's
+# FIRST-set lexer cannot recognize the `{{` delimiter against free text
+# via ABNF character classes — a broad class silently shadows the fixed
+# delimiter token and the tags are never seen (see dx-report.md). A custom
+# matcher gives the lexer the control ABNF cannot here, while the token
+# grammar stays declarative.
+#
+# The accumulator is read back by slicing the span a single parse appended
+# (start..end), so it is re-entrant: a nested compile reads its own span.
+
+def mustache-acc (flex [])
+
+def mustache-grammar Parse.grammar
+
+Parse.matcher mustache-grammar lex 5 ([s:String] => [
+  def two (slice 0 2 s)
+  if (two eq "{{")
+    [ def triple (eq "{{{" (slice 0 3 s))
+      def closer (if triple ["}}}"] ["}}"])
+      def ci (StringUtil.indexof closer s)
+      if (ci lt 0) [ raise template_syntax `unterminated tag near: ${(slice 0 16 s)}` ] []
+      def openlen (if triple [3] [2])
+      def tagbody (slice openlen ci s)
+      def sig (slice 0 1 tagbody)
+      def tail (StringUtil.trim (slice 1 (tagbody size) tagbody))
+      def tok (if triple [{t:'unesc' v:(StringUtil.trim tagbody)}] [
+        if (sig eq "#") [{t:'sec'     v:tail}] [
+        if (sig eq "^") [{t:'inv'     v:tail}] [
+        if (sig eq "/") [{t:'cls'     v:tail}] [
+        if (sig eq ">") [{t:'part'    v:tail}] [
+        if (sig eq "!") [{t:'comment' v:tail}] [
+        if (sig eq "&") [{t:'unesc'   v:tail}] [
+          {t:'var' v:(StringUtil.trim tagbody)} ]]]]]] ])
+      def adv (add ci (closer size))
+      def _ (mustache-acc push tok)
+      {src: (slice 0 adv s) tin:'#TX' val: 'tag'} ]
+    [ def ni (StringUtil.indexof "{{" s)
+      def adv (if (ni lt 0) [(s size)] [ni])
+      def txt (slice 0 adv s)
+      def _ (mustache-acc push {t:'text' v:txt})
+      {src: txt tin:'#TX' val: 'text'} ]
+]) end
+
+Parse.rule mustache-grammar val {
+  open:  [ {s:'#TX' p:'val'} {} ]
+  close: [ {s:'#ZZ'} {} ]
+} end
+
+Parse.register mustache mustache-grammar end
+
+# Lex a source string into its token list (re-entrant via span slicing).
+def lex-mustache fn [ [src:String] [List] [
+  def st (mustache-acc size)
+  def _ (parse mustache src)
+  slice st (mustache-acc size) mustache-acc
+] ]
+
+
+# --- compiler -------------------------------------------------------
+#
+# Lower a token list to an AQL expression that builds the output. The
+# walk is a self-recursive descent over the token list (recursion is
+# sound in aql; only the bound name is unbound inside its own body, which
+# self-reference is not). `compile-seq` returns {code, next}: `code` is a
+# space-separated run of String-valued AQL expressions and `next` is the
+# index just past the run (at the matching `cls`, or the end). A section
+# recurses for its subseq sequence, validates the matching close, then
+# recurses for the remainder — all self-recursion.
+
+# Render a leaf token to one AQL expression. `name` literals are embedded
+# via `canon` so any text (quotes, braces, newlines) round-trips safely.
+def compile-leaf fn [ [kind:String name:String] [String] [
+  if (kind eq "text")    [ canon name ] [
+  if (kind eq "var")     [ StringUtil.concat ["(tpl_esc (tpl_lookup " (canon name) " ctx))"] ] [
+  if (kind eq "unesc")   [ StringUtil.concat ["(tpl_str (tpl_lookup " (canon name) " ctx))"] ] [
+  # comment / partial (partials are a future feature) render nothing
+  `""` ]]]
+] ]
+
+# Wrap an subseq sequence's code in a body fn for a section.
+def compile-body fn [ [innercode:String] [String] [
+  StringUtil.concat ["(fn [ [ctx:Any] [String] [ ([ " innercode " ] StringUtil.concat) ] ])"]
+] ]
+
+def compile-seq fn [ [toks:List i:Integer] [Map] [
+  if (i gte (toks size)) [ do {code:[""] next:[i]} ] [
+    def tok  (toks get (i))
+    def kind (tok get "t")
+    def name (tok get "v")
+    if (kind eq "cls") [ do {code:[""] next:[i]} ] [
+      def is-sec (kind eq "sec")
+      def is-inv (kind eq "inv")
+      if (is-sec or is-inv) [
+        # subseq sequence up to the matching close
+        def subseq    (compile-seq toks (i add 1))
+        def cidx     (subseq get "next")
+        if (cidx gte (toks size))
+          [ raise template_syntax `unclosed section: {{#${name}}}` ] []
+        def closetok (toks get (cidx))
+        if ((closetok get "v") eq name) []
+          [ raise template_syntax `mismatched close: expected {{/${name}}}, got {{/${(closetok get "v")}}}` ]
+        def secword  (if is-inv ["tpl_inverted"] ["tpl_section"])
+        def sexpr (StringUtil.concat
+          ["(" secword " (tpl_lookup " (canon name) " ctx) ctx " (compile-body (subseq get "code")) " " (compile-body "") ")"])
+        def more  (compile-seq toks (cidx add 1))
+        do { code: [(StringUtil.concat [sexpr " " (more get "code")])] next: [(more get "next")] }
+      ] [
+        def expr (compile-leaf kind name)
+        def more (compile-seq toks (i add 1))
+        do { code: [(StringUtil.concat [expr " " (more get "code")])] next: [(more get "next")] }
+      ]
+    ]
+  ]
+] ]
+
+# --- shared expression helpers (handlebars / liquid / jinja) --------
+#
+# These run at compile time (ordinary AQL code, not inside a matcher), so
+# they may call one another freely.
+
+def first-word fn [ [s:String] [String] [
+  def t (StringUtil.trim s)
+  def sp (StringUtil.indexof " " t)
+  if (sp lt 0) [t] [(slice 0 sp t)]
+] ]
+
+def after-word fn [ [s:String] [String] [
+  def t (StringUtil.trim s)
+  def sp (StringUtil.indexof " " t)
+  if (sp lt 0) [""] [(StringUtil.trim (slice (sp add 1) (t size) t))]
+] ]
+
+def is-num-str fn [ [s:String] [Boolean] [
+  if ((s size) eq 0) [false] [ (StringUtil.contains (slice 0 1 s) "-0123456789") ]
+] ]
+
+# Compile one operand — a quoted/numeric/boolean literal, the special
+# nil/empty/this, or a variable path — to a value expression over `ctx`.
+def compile-operand fn [ [tok:String] [String] [
+  def t (StringUtil.trim tok)
+  if ((t size) eq 0) [ "__none" ] [
+    def c0 (slice 0 1 t)
+    if ((c0 eq "'") or (c0 eq "\"")) [ canon (slice 1 ((t size) sub 1) t) ] [
+    if ((t eq "true") or (t eq "false")) [ t ] [
+    if (is-num-str t) [ t ] [
+    if (((t eq "nil") or (t eq "null")) or ((t eq "none") or (t eq "empty"))) [ "__none" ] [
+      StringUtil.concat ["(tpl_lookup " (canon t) " ctx)"] ]]]]
+  ]
+] ]
+
+# Split a filter argument list on top-level commas, respecting quotes, so
+# `", "` stays one argument. Returns a List of argument substrings.
+def split-args fn [ [s:String] [List] [
+  def out (flex [])
+  def res (do {cur:[""] q:[""]} (iota (s size)) [ var [[i acc]
+    def ch  (slice i (i add 1) s)
+    def cur (acc get "cur")
+    def q   (acc get "q")
+    if (q eq "")
+      [ if ((ch eq "'") or (ch eq "\""))
+          [ do {cur:[(StringUtil.concat [cur ch])] q:[ch]} ]
+          [ if (ch eq ",")
+              [ def _ (out push cur)  do {cur:[""] q:[""]} ]
+              [ do {cur:[(StringUtil.concat [cur ch])] q:[""]} ] ] ]
+      [ if (ch eq q)
+          [ do {cur:[(StringUtil.concat [cur ch])] q:[""]} ]
+          [ do {cur:[(StringUtil.concat [cur ch])] q:[q]} ] ]
+  ] ] fold)
+  def _2 (out push (res get "cur"))
+  slice 0 (out size) out
+] ]
+
+# A single filter segment ("name" or "name: a, b") wrapped around acc.
+def parse-filter fn [ [seg:String acc:String] [String] [
+  def f (StringUtil.trim seg)
+  def ci (StringUtil.indexof ":" f)
+  if (ci lt 0)
+    [ StringUtil.concat ["(tpl_filter " (canon f) " " acc " [])"] ]
+    [ def nm (StringUtil.trim (slice 0 ci f))
+      def argstr (slice (ci add 1) (f size) f)
+      def argexprs ((split-args argstr) each [ var [[a] (compile-operand a) ] ])
+      StringUtil.concat ["(tpl_filter " (canon nm) " " acc " [ " (StringUtil.concat argexprs {sep:" "}) " ])"] ]
+] ]
+
+# Compile an output expression ("x | f | g: a") to a raw String value.
+# Liquid and Jinja do not HTML-escape by default, so the result is tpl_str.
+def compile-output fn [ [expr:String] [String] [
+  def parts (StringUtil.split "|" expr)
+  def operand (compile-operand (parts get 0))
+  def val (operand (slice 1 (parts size) parts) [ var [[seg acc] (parse-filter seg acc) ] ] fold)
+  StringUtil.concat ["(tpl_str " val ")"]
+] ]
+
+# Compile one comparison or a bare truthiness test to a Boolean expression.
+def compile-cmp fn [ [s:String] [String] [
+  def t (StringUtil.trim s)
+  def eqi (StringUtil.indexof "==" t)
+  def nei (StringUtil.indexof "!=" t)
+  def gei (StringUtil.indexof ">=" t)
+  def lei (StringUtil.indexof "<=" t)
+  def gti (StringUtil.indexof ">" t)
+  def lti (StringUtil.indexof "<" t)
+  if (eqi gte 0) [ StringUtil.concat ["(" (compile-operand (slice 0 eqi t)) " eq " (compile-operand (slice (eqi add 2) (t size) t)) ")"] ] [
+  if (nei gte 0) [ StringUtil.concat ["(not (" (compile-operand (slice 0 nei t)) " eq " (compile-operand (slice (nei add 2) (t size) t)) "))"] ] [
+  if (gei gte 0) [ StringUtil.concat ["(" (compile-operand (slice 0 gei t)) " gte " (compile-operand (slice (gei add 2) (t size) t)) ")"] ] [
+  if (lei gte 0) [ StringUtil.concat ["(" (compile-operand (slice 0 lei t)) " lte " (compile-operand (slice (lei add 2) (t size) t)) ")"] ] [
+  if (gti gte 0) [ StringUtil.concat ["(" (compile-operand (slice 0 gti t)) " gt " (compile-operand (slice (gti add 1) (t size) t)) ")"] ] [
+  if (lti gte 0) [ StringUtil.concat ["(" (compile-operand (slice 0 lti t)) " lt " (compile-operand (slice (lti add 1) (t size) t)) ")"] ] [
+    StringUtil.concat ["(tpl_truthy " (compile-operand t) ")"] ]]]]]]
+] ]
+
+def compile-cond-and fn [ [s:String] [String] [
+  def ands (StringUtil.split " and " s)
+  if ((ands size) eq 1)
+    [ compile-cmp (ands get 0) ]
+    [ StringUtil.concat ["(" (StringUtil.concat (ands each [ var [[a] (compile-cmp a) ] ]) {sep:" and "}) ")"] ]
+] ]
+
+def compile-cond fn [ [s:String] [String] [
+  def ors (StringUtil.split " or " s)
+  if ((ors size) eq 1)
+    [ compile-cond-and (ors get 0) ]
+    [ StringUtil.concat ["(" (StringUtil.concat (ors each [ var [[a] (compile-cond-and a) ] ]) {sep:" or "}) ")"] ]
+] ]
+
+
+# --- handlebars compiler --------------------------------------------
+#
+# Reuses the mustache lexer (same `{{ }}` / `{{{ }}}` tokens) and adds the
+# block helpers if / unless / each / with, the {{else}} clause, and
+# path/literal arguments. A `{{#x}}` whose first word is not a known helper
+# falls back to a mustache-style section.
+
+def hb-leaf fn [ [kind:String name:String] [String] [
+  if (kind eq "text")  [ canon name ] [
+  if (kind eq "var")   [ StringUtil.concat ["(tpl_esc " (compile-operand name) ")"] ] [
+  if (kind eq "unesc") [ StringUtil.concat ["(tpl_str " (compile-operand name) ")"] ] [
+  `""` ]]]
+] ]
+
+def hb-block fn [ [helper:String arg:String thencode:String elscode:String] [String] [
+  def tb (compile-body thencode)
+  def eb (compile-body elscode)
+  if (helper eq "if")     [ StringUtil.concat ["(tpl_if (tpl_truthy " (compile-operand arg) ") ctx " tb " " eb ")"] ] [
+  if (helper eq "unless") [ StringUtil.concat ["(tpl_if (tpl_truthy " (compile-operand arg) ") ctx " eb " " tb ")"] ] [
+  if (helper eq "each")   [ StringUtil.concat ["(tpl_each " (compile-operand arg) " ctx " tb " " eb ")"] ] [
+  if (helper eq "with")   [ StringUtil.concat ["(tpl_with " (compile-operand arg) " ctx " tb ")"] ] [
+    StringUtil.concat ["(tpl_section " (compile-operand helper) " ctx " tb " " eb ")"] ]]]]
+] ]
+
+def compile-hb-seq fn [ [toks:List i:Integer] [Map] [
+  if (i gte (toks size)) [ do {code:[""] next:[i] stop:["end"]} ] [
+    def tok  (toks get (i))
+    def kind (tok get "t")
+    def v    (tok get "v")
+    if (kind eq "cls") [ do {code:[""] next:[i] stop:["cls"]} ] [
+    if ((kind eq "var") and (v eq "else")) [ do {code:[""] next:[i] stop:["else"]} ] [
+      def is-sec (kind eq "sec")
+      def is-inv (kind eq "inv")
+      if (is-sec or is-inv) [
+        def helper    (if is-sec [(first-word v)] [v])
+        def arg       (if is-sec [(after-word v)] [""])
+        def closename (if is-sec [helper] [v])
+        def thn       (compile-hb-seq toks (i add 1))
+        def hadelse   ((thn get "stop") eq "else")
+        def els       (if hadelse [(compile-hb-seq toks ((thn get "next") add 1))] [(do {code:[""] next:[(thn get "next")]})])
+        def cidx      (els get "next")
+        if (cidx gte (toks size)) [ raise template_syntax `unclosed block: ${v}` ] []
+        if (((toks get (cidx)) get "v") eq closename) []
+          [ raise template_syntax `mismatched close: expected {{/${closename}}}, got {{/${((toks get (cidx)) get "v")}}}` ]
+        def blockexpr (if is-inv
+          [ StringUtil.concat ["(tpl_inverted " (compile-operand v) " ctx " (compile-body (thn get "code")) " " (compile-body (els get "code")) ")"] ]
+          [ (hb-block helper arg (thn get "code") (els get "code")) ])
+        def more (compile-hb-seq toks (cidx add 1))
+        do { code: [(StringUtil.concat [blockexpr " " (more get "code")])] next: [(more get "next")] stop: [(more get "stop")] }
+      ] [
+        def expr (hb-leaf kind v)
+        def more (compile-hb-seq toks (i add 1))
+        do { code: [(StringUtil.concat [expr " " (more get "code")])] next: [(more get "next")] stop: [(more get "stop")] }
+      ]
+    ]]
+  ]
+] ]
+
+
+# --- liquid / jinja lexers ------------------------------------------
+#
+# Liquid has two delimiters — `{{ … }}` (output) and `{% … %}` (tags);
+# Jinja adds `{# … #}` (comments). Each matcher segments the source and
+# pushes typed {t,v} tokens onto its accumulator. As with mustache, the
+# next-delimiter scan is inlined (a matcher cannot reliably call helpers).
+
+def liquid-acc (flex [])
+def liquid-grammar Parse.grammar
+Parse.matcher liquid-grammar lex 5 ([s:String] => [
+  def two (slice 0 2 s)
+  if (two eq "{{")
+    [ def ci (StringUtil.indexof "}}" s)
+      if (ci lt 0) [ raise template_syntax `unterminated output {{` ] []
+      def _ (liquid-acc push {t:'out' v:(StringUtil.trim (slice 2 ci s))})
+      {src: (slice 0 (add ci 2) s) tin:'#TX' val:'out'} ] [
+  if (two eq "{%")
+    [ def ci (StringUtil.indexof "%}" s)
+      if (ci lt 0) [ raise template_syntax `unterminated tag {%` ] []
+      def _ (liquid-acc push {t:'tag' v:(StringUtil.trim (slice 2 ci s))})
+      {src: (slice 0 (add ci 2) s) tin:'#TX' val:'tag'} ] [
+    def n1 (StringUtil.indexof "{{" s)
+    def n2 (StringUtil.indexof "{%" s)
+    def e1 (if (n1 lt 0) [(s size)] [n1])
+    def e2 (if (n2 lt 0) [(s size)] [n2])
+    def nx (if (e1 lt e2) [e1] [e2])
+    def txt (slice 0 nx s)
+    def _ (liquid-acc push {t:'text' v:txt})
+    {src: txt tin:'#TX' val:'text'} ]]
+]) end
+Parse.rule liquid-grammar val {open:[{s:'#TX' p:'val'} {}] close:[{s:'#ZZ'} {}]} end
+Parse.register liquid liquid-grammar end
+def lex-liquid fn [ [src:String] [List] [
+  def st (liquid-acc size)  def _ (parse liquid src)  slice st (liquid-acc size) liquid-acc
+] ]
+
+def jinja-acc (flex [])
+def jinja-grammar Parse.grammar
+Parse.matcher jinja-grammar lex 5 ([s:String] => [
+  def two (slice 0 2 s)
+  if (two eq "{{")
+    [ def ci (StringUtil.indexof "}}" s)
+      if (ci lt 0) [ raise template_syntax `unterminated output {{` ] []
+      def _ (jinja-acc push {t:'out' v:(StringUtil.trim (slice 2 ci s))})
+      {src: (slice 0 (add ci 2) s) tin:'#TX' val:'out'} ] [
+  if (two eq "{%")
+    [ def ci (StringUtil.indexof "%}" s)
+      if (ci lt 0) [ raise template_syntax `unterminated tag {%` ] []
+      def _ (jinja-acc push {t:'tag' v:(StringUtil.trim (slice 2 ci s))})
+      {src: (slice 0 (add ci 2) s) tin:'#TX' val:'tag'} ] [
+  if (two eq "{#")
+    [ def ci (StringUtil.indexof "#}" s)
+      if (ci lt 0) [ raise template_syntax `unterminated comment {#` ] []
+      def _ (jinja-acc push {t:'comment' v:''})
+      {src: (slice 0 (add ci 2) s) tin:'#TX' val:'comment'} ] [
+    def n1 (StringUtil.indexof "{{" s)
+    def n2 (StringUtil.indexof "{%" s)
+    def n3 (StringUtil.indexof "{#" s)
+    def e1 (if (n1 lt 0) [(s size)] [n1])
+    def e2 (if (n2 lt 0) [(s size)] [n2])
+    def e3 (if (n3 lt 0) [(s size)] [n3])
+    def m12 (if (e1 lt e2) [e1] [e2])
+    def nx (if (m12 lt e3) [m12] [e3])
+    def txt (slice 0 nx s)
+    def _ (jinja-acc push {t:'text' v:txt})
+    {src: txt tin:'#TX' val:'text'} ]]]
+]) end
+Parse.rule jinja-grammar val {open:[{s:'#TX' p:'val'} {}] close:[{s:'#ZZ'} {}]} end
+Parse.register jinja jinja-grammar end
+def lex-jinja fn [ [src:String] [List] [
+  def st (jinja-acc size)  def _ (parse jinja src)  slice st (jinja-acc size) jinja-acc
+] ]
+
+
+# --- liquid / jinja compiler ----------------------------------------
+#
+# One compiler over the shared {text, out, tag, comment} token stream. It
+# accepts the union of Liquid and Jinja keywords (elsif/elif, assign/set,
+# endunless), so both lexers feed the same logic. `compile-tagged-seq`
+# returns {code, next, stopkw}: stopkw is the first word of the tag that
+# stopped the run (a block mid/close), or "end" at the token-stream end.
+# Block tags (if/for) delegate to liquid-if / liquid-for, which recurse
+# back into compile-tagged-seq — guarded so the definition-time trace
+# short-circuits on empty input.
+
+def is-stopkw fn [ [kw:String] [Boolean] [
+  ((((kw eq "else") or (kw eq "elsif")) or ((kw eq "elif") or (kw eq "endif")))
+   or ((((kw eq "endunless") or (kw eq "endfor")) or ((kw eq "when") or (kw eq "endcase"))) or (kw eq "endcomment")))
+] ]
+
+def compile-tagged-seq fn [ [toks:List i:Integer] [Map] [
+  if (i gte (toks size)) [ do {code:[""] next:[i] stopkw:["end"]} ] [
+    def tok  (toks get (i))
+    def kind (tok get "t")
+    def v    (tok get "v")
+    if (kind eq "text")    [ def more (compile-tagged-seq toks (i add 1))
+                             do { code: [(StringUtil.concat [(canon v) " " (more get "code")])] next: [(more get "next")] stopkw: [(more get "stopkw")] } ] [
+    if (kind eq "comment") [ def more (compile-tagged-seq toks (i add 1))
+                             do { code: [(more get "code")] next: [(more get "next")] stopkw: [(more get "stopkw")] } ] [
+    if (kind eq "out")     [ def more (compile-tagged-seq toks (i add 1))
+                             do { code: [(StringUtil.concat [(compile-output v) " " (more get "code")])] next: [(more get "next")] stopkw: [(more get "stopkw")] } ] [
+      def kw  (first-word v)
+      def arg (after-word v)
+      if (is-stopkw kw) [ do {code:[""] next:[i] stopkw:[kw]} ] [
+      if ((kw eq "if") or (kw eq "unless")) [
+        def blk  (liquid-if toks i)
+        def more (compile-tagged-seq toks (blk get "next"))
+        do { code: [(StringUtil.concat [(blk get "code") " " (more get "code")])] next: [(more get "next")] stopkw: [(more get "stopkw")] }
+      ] [
+      if (kw eq "for") [
+        def blk  (liquid-for toks i)
+        def more (compile-tagged-seq toks (blk get "next"))
+        do { code: [(StringUtil.concat [(blk get "code") " " (more get "code")])] next: [(more get "next")] stopkw: [(more get "stopkw")] }
+      ] [
+      if ((kw eq "assign") or (kw eq "set")) [
+        def eqi  (StringUtil.indexof "=" arg)
+        if (eqi lt 0) [ raise template_syntax `bad ${kw}: ${v}` ] []
+        def varn (StringUtil.trim (slice 0 eqi arg))
+        def valx (compile-output (StringUtil.trim (slice (eqi add 1) (arg size) arg)))
+        def more (compile-tagged-seq toks (i add 1))
+        def restb (compile-body (more get "code"))
+        do { code: [(StringUtil.concat ["(" restb " (tpl_set ctx " (canon varn) " " valx "))"])] next: [(more get "next")] stopkw: [(more get "stopkw")] }
+      ] [
+      if (kw eq "comment") [
+        def subc (compile-tagged-seq toks (i add 1))
+        def cidx (subc get "next")
+        if (cidx gte (toks size)) [ raise template_syntax `unclosed {% comment %}` ] []
+        def more (compile-tagged-seq toks (cidx add 1))
+        do { code: [(more get "code")] next: [(more get "next")] stopkw: [(more get "stopkw")] }
+      ] [
+        raise template_syntax `unsupported tag: ${kw}`
+      ]]]]]
+    ]]]
+  ]
+] ]
+
+# if / unless with an elsif/elif/else chain. Returns {code, next} where
+# next is the index just past the matching endif/endunless.
+def liquid-if fn [ [toks:List i:Integer] [Map] [
+  if (i gte (toks size)) [ do {code:[""] next:[i]} ] [
+    def v    ((toks get (i)) get "v")
+    def kw   (first-word v)
+    def cnd0 (compile-cond (after-word v))
+    def cnd  (if (kw eq "unless") [(StringUtil.concat ["(not " cnd0 ")"])] [cnd0])
+    def thn  (compile-tagged-seq toks (i add 1))
+    def tb   (compile-body (thn get "code"))
+    def nx   (thn get "next")
+    def sk   (thn get "stopkw")
+    if ((sk eq "elsif") or (sk eq "elif")) [
+      def elsep (liquid-if toks nx)
+      do { code: [(StringUtil.concat ["(tpl_if " cnd " ctx " tb " " (compile-body (elsep get "code")) ")"])] next: [(elsep get "next")] }
+    ] [
+    if (sk eq "else") [
+      def els  (compile-tagged-seq toks (nx add 1))
+      def cidx (els get "next")
+      if (cidx gte (toks size)) [ raise template_syntax `unclosed ${kw}` ] []
+      do { code: [(StringUtil.concat ["(tpl_if " cnd " ctx " tb " " (compile-body (els get "code")) ")"])] next: [(cidx add 1)] }
+    ] [
+      if (nx gte (toks size)) [ raise template_syntax `unclosed ${kw}` ] []
+      do { code: [(StringUtil.concat ["(tpl_if " cnd " ctx " tb " " (compile-body "") ")"])] next: [(nx add 1)] }
+    ]]
+  ]
+] ]
+
+# for X in Y with an optional {% else %}. Returns {code, next} past endfor.
+def liquid-for fn [ [toks:List i:Integer] [Map] [
+  if (i gte (toks size)) [ do {code:[""] next:[i]} ] [
+    def v     ((toks get (i)) get "v")
+    def arg   (after-word v)
+    def ini   (StringUtil.indexof " in " arg)
+    if (ini lt 0) [ raise template_syntax `bad for: ${v}` ] []
+    def varn  (StringUtil.trim (slice 0 ini arg))
+    def listx (compile-operand (StringUtil.trim (slice (ini add 4) (arg size) arg)))
+    def body  (compile-tagged-seq toks (i add 1))
+    def nx    (body get "next")
+    def sk    (body get "stopkw")
+    def bb    (compile-body (body get "code"))
+    if (sk eq "else") [
+      def els  (compile-tagged-seq toks (nx add 1))
+      def cidx (els get "next")
+      if (cidx gte (toks size)) [ raise template_syntax `unclosed for` ] []
+      do { code: [(StringUtil.concat ["(tpl_for " listx " " (canon varn) " ctx " bb " " (compile-body (els get "code")) ")"])] next: [(cidx add 1)] }
+    ] [
+      if (nx gte (toks size)) [ raise template_syntax `unclosed for` ] []
+      do { code: [(StringUtil.concat ["(tpl_for " listx " " (canon varn) " ctx " bb " " (compile-body "") ")"])] next: [(nx add 1)] }
+    ]
+  ]
+] ]
+
+
+# --- program assembly + engine dispatch -----------------------------
+
+# Wrap a compiled body expression in the runtime prelude + __render fn.
+def wrap-program fn [ [bodycode:String] [String] [
+  StringUtil.concat [
+    tpl-runtime
+    `
+def __render fn [ [ctx:Any] [String] [ ([ `
+    bodycode
+    ` ] StringUtil.concat) ] ]
+`
+  ]
+] ]
+
+# Lower a full source string to a complete program for the given engine.
+def gen-program fn [ [eng:String src:String] [String] [
+  if (eng eq "mustache") [
+    def toks (lex-mustache src)
+    def r    (compile-seq toks 0)
+    if ((r get "next") lt (toks size)) [ raise template_syntax `unexpected close tag` ] []
+    wrap-program (r get "code")
+  ] [
+  if (eng eq "handlebars") [
+    def toks (lex-mustache src)
+    def r    (compile-hb-seq toks 0)
+    if ((r get "next") lt (toks size)) [ raise template_syntax `unexpected close tag` ] []
+    wrap-program (r get "code")
+  ] [
+  if (eng eq "liquid") [
+    wrap-program ((compile-tagged-seq (lex-liquid src) 0) get "code")
+  ] [
+  if (eng eq "jinja") [
+    wrap-program ((compile-tagged-seq (lex-jinja src) 0) get "code")
+  ] [
+    raise unknown_engine `no engine`
+  ]]]]
+] ]
+
+
+# --- public API -----------------------------------------------------
+
+# The engines this build can compile, all on the shared spine.
+def engine-list ["mustache" "handlebars" "liquid" "jinja"]
+
+def engine-known fn [ [name:String] [Boolean] [
+  (false engine-list [ var [[e acc] (acc or (e eq name)) ] ] fold)
+] ]
+
+def tpl-compile fn [ [opts:Options] [Compiled] [
+  def engine (opts get "engine")
+  def source (opts get "source")
+  if ((engine is String) not)
+    [ raise bad_input `Template.compile: 'engine' must be a String (got ${engine})` ] []
+  if ((source is String) not)
+    [ raise bad_input `Template.compile: 'source' must be a String (got ${source})` ] []
+  if (engine-known engine) []
+    [ raise unknown_engine `Template.compile: no engine '${engine}'; available: ${engine-list}` ]
+  make Compiled { engine: engine program: (gen-program engine source) }
+] ]
+
+def tpl-render-compiled fn [ [c:Compiled cdata:Any] [String] [
+  def full (StringUtil.concat [
+    c.program
+    `
+def __ctx `
+    (canon cdata)
+    `
+(__render __ctx)`
+  ])
+  Vm.run-with full tpl-sandbox
+] ]
+
+# One-shot: compile then render. Accepts {engine, source, context}.
+def tpl-render-opts fn [ [opts:Options] [String] [
+  def c (tpl-compile {engine: (opts get "engine") source: (opts get "source")})
+  def cdata (opts get "context")
+  tpl-render-compiled c cdata
+] ]
+
+# `render` dispatches: a Compiled receiver renders against a context; an
+# options map is the one-shot form.
+def tpl-render fn [
+  [cdata:Any c:Compiled] [String] [ tpl-render-compiled c cdata ]
+  [opts:Options]         [String] [ tpl-render-opts opts ]
+]
+
+
+# --- namespace ------------------------------------------------------
+
+export "Template" {
+  Compiled
+  compile: tpl-compile/r
+  render:  tpl-render/r
+  engines: engine-list
+}
