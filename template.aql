@@ -749,7 +749,7 @@ def __render fn [ [ctx:Any] [String] [ ([ `
 ] ]
 
 # Lower a full source string to a complete program for the given engine.
-def gen-program fn [ [eng:String src:String] [String] [
+def gen-program fn [ [eng:Any src:Any] [String] [
   if (eng eq "mustache") [
     def toks (lex-mustache src)
     def r    (compile-seq toks 0)
