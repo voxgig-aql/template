@@ -6,6 +6,11 @@ AQL project. Every code block below is verified to run against
 [The one calling rule](#the-one-calling-rule) and
 [Common mistakes](#common-mistakes).
 
+> **Calling convention.** Forward args, receiver (the `Compiled`) last:
+> `Template.render context compiled`. Piping
+> `compiled Template.render context` also works; only
+> `Template.render compiled context` misbinds.
+
 ## What it is
 
 A templating engine that renders text templates against a data context,
@@ -36,27 +41,43 @@ import "./template.aql"
 ## The one calling rule
 
 AQL is not C/Python/JS. There is no `f(a, b)` and no `obj.method(a)`.
-A call is **receiver-first, arguments forward**:
+A call is a **verb with its arguments forward** — `Verb arg1 arg2` — and a
+value sitting to the **left** of the verb pipes into the verb's **last**
+parameter.
 
-```
-receiver Template.verb arg1
-```
-
-— the **receiver/data comes first**, then the verb, then any extra
-arguments after the verb. Group a call in parens to use its result:
+The public `Template` words put the **receiver (the `Compiled` template)
+LAST**: `render`'s signature is `[cdata:Any c:Compiled]` — **data first,
+compiled last**. Because the receiver is the last parameter, two spellings
+both bind:
 
 ```aql
-def tpl ({engine:'mustache' source:'Hi {{name}}!'} Template.compile)
+def tpl (Template.compile {engine:'mustache' source:'Hi {{name}}!'})
+
+# forward form (canonical): data forward, compiled LAST
+print (Template.render {name:'Ada'} tpl)   # => Hi Ada!
+
+# piping: the compiled template flows in from the LEFT
 print (tpl Template.render {name:'Ada'})   # => Hi Ada!
 ```
+
+Only putting the receiver **first in forward position** misbinds — the data
+lands in the receiver slot and render fails to match a signature:
+
+```aql
+print (Template.render tpl {name:'Ada'})   # ✗ WRONG: tpl→cdata, map→c
+```
+
+`compile` takes a single `Options` map (it is a constructor), so
+`Template.compile {…}` and `{…} Template.compile` are equivalent. Group a
+call in parens to use its result.
 
 ## API reference (exact call shapes)
 
 | Call | Returns | Notes |
 |------|---------|-------|
-| `{engine:String, source:String} Template.compile` | `Compiled` | Parse + compile a template once. Bad args raise `bad_input`; an unimplemented engine raises `unknown_engine`. |
-| `compiled Template.render context` | `String` | Render a compiled template against a context (any Map/value). |
-| `{engine, source, context} Template.render` | `String` | One-shot convenience: compile then render in one call. |
+| `Template.compile {engine:String, source:String}` | `Compiled` | Parse + compile a template once (single `Options` arg; `{…} Template.compile` is equivalent). Bad args raise `bad_input`; an unimplemented engine raises `unknown_engine`. |
+| `Template.render context compiled` | `String` | Render a compiled template against a context (any Map/value). Receiver LAST; piping `compiled Template.render context` is equivalent. |
+| `Template.render {engine, source, context}` | `String` | One-shot convenience: compile then render in one call (single `Options` arg). |
 | `Template.engines` | `List` | The engines this build implements (`['mustache' 'handlebars' 'liquid' 'jinja']`). |
 
 `Compiled` has read-only fields `engine` (String) and `program` (the
@@ -179,9 +200,8 @@ template_syntax/q (e get "code") Assert.equal end
 
 | ✗ Don't write | ✓ Write | Why |
 |---------------|---------|-----|
-| `Template.render(tpl, ctx)` | `(tpl Template.render ctx)` | No `f(a,b)` syntax in AQL. |
-| `tpl.render(ctx)` | `(tpl Template.render ctx)` | No method-call syntax. |
-| `Template.render tpl ctx` (verb-first) | `tpl Template.render ctx` (receiver first) | Receiver comes first. |
+| `Template.render(tpl, ctx)` / `tpl.render(ctx)` | `(Template.render ctx tpl)` | AQL has no call/method syntax. |
+| `Template.render tpl ctx` (receiver first in forward position) | `Template.render ctx tpl` or `tpl Template.render ctx` | The `Compiled` receiver binds LAST — put it last, or pipe it in from the left. |
 | `e get code` | `e get "code"` | `get` evaluates its key; use a quoted String. |
 | treat `{{x}}` as raw | it is **HTML-escaped** | use `{{{x}}}` / `{{& x}}` for raw output. |
 | rely on parent context in a section | pass needed fields into the item | no parent-context fallback yet. |

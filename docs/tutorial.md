@@ -24,8 +24,8 @@ print ({engine:'mustache' source:'Hello {{name}}!' context:{name:'Ada'}} Templat
 
 Three things to notice, because AQL is not C/Python/JS:
 
-- The call is **receiver-first**: the options map comes first, then the
-  verb `Template.render`. There is no `Template.render(opts)`.
+- The call reads **forward**: the options map sits to the left of the verb
+  `Template.render` and flows into it. There is no `Template.render(opts)`.
 - `{{name}}` is a **placeholder** filled from the context's `name` field.
 - The whole call is wrapped in parens so its result becomes the argument
   to `print`.
@@ -45,8 +45,11 @@ print (row Template.render {label:'second'})
 ```
 
 `Template.compile` does the parsing and code generation; `Template.render`
-just runs the result against a context. (`tpl.engine` tells you which
-engine a compiled template was built for.)
+just runs the result against a context. Its receiver (the `Compiled`) is
+the **last** argument, so the canonical forward form is
+`Template.render {label:'first'} row`; piping it in from the left, as above,
+is equivalent. (`tpl.engine` tells you which engine a compiled template was
+built for.)
 
 ## 3. Escaping
 

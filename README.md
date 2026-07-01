@@ -23,6 +23,11 @@ print ({engine:'liquid' source:'{% for x in xs %}{{ x | upcase }} {% endfor %}' 
 # => A B
 ```
 
+> **Calling convention.** Forward args, receiver (the `Compiled`) last:
+> `Template.render context compiled`. Piping
+> `compiled Template.render context` also works; only
+> `Template.render compiled context` misbinds.
+
 > **Calling this library from an AI coding agent?** Read
 > **[AGENTS.md](AGENTS.md)** first — the exact AQL calling convention,
 > verified idioms, and common mistakes. Claude Code auto-loads it via
@@ -50,7 +55,7 @@ See the header of [`template.aql`](template.aql) for the full design.
 | Call | Purpose |
 |------|---------|
 | `{engine, source} Template.compile` | parse + compile a template → `Compiled` |
-| `compiled Template.render context`  | render a compiled template against a context → String |
+| `Template.render context compiled`  | render a compiled template against a context → String (receiver last; `compiled Template.render context` pipes too) |
 | `{engine, source, context} Template.render` | one-shot: compile + render |
 | `Template.engines` | the engines this build implements (`['mustache' 'handlebars' 'liquid' 'jinja']`) |
 

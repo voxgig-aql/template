@@ -24,10 +24,15 @@ them internally.
 
 ## Calling convention
 
-Every operation is a receiver-first, arguments-forward word:
-`receiver Template.verb arg`. Group a call in parens to use its result as a
-value (`(tpl Template.render ctx)`). The receiver (the data) comes first;
-there is no `Template.verb(args)` and no `tpl.render(ctx)`.
+Every operation is a verb with its arguments **forward** — `Template.verb
+arg1 arg2` — and a value to the **left** of the verb pipes into the verb's
+**last** parameter. The `Template.render` receiver (the `Compiled`) is the
+**last** parameter, so the canonical forward form puts it last —
+`Template.render context compiled` — and piping
+`compiled Template.render context` is equivalent; only
+`Template.render compiled context` misbinds. Group a call in parens to use
+its result as a value. There is no `Template.verb(args)` and no
+`tpl.render(ctx)`.
 
 ---
 
@@ -69,7 +74,7 @@ Render a template against a context. Two forms:
 
 | | |
 |--|--|
-| **Call (two-step)** | `compiled Template.render context` |
+| **Call (two-step)** | `Template.render context compiled` (receiver last; `compiled Template.render context` pipes too) |
 | **Call (one-shot)** | `{engine, source, context} Template.render` |
 | **Stack in**| a `Compiled` + a context value, **or** an options Map |
 | **Returns** | `String` |

@@ -71,13 +71,16 @@ references.
 ## Compile once and render many contexts
 
 Split the work: `Template.compile` returns a reusable `Compiled`, and
-`Template.render` runs it against each context.
+`Template.render` runs it against each context. `render`'s receiver (the
+`Compiled`) is its **last** argument, so the canonical forward form is
+`Template.render context compiled`; piping `compiled Template.render context`
+(below) is equivalent.
 
 ```aql
 import "./template.aql"
 def tpl ({engine:'mustache' source:'<li>{{label}}</li>'} Template.compile)
-print (tpl Template.render {label:'a'})
-print (tpl Template.render {label:'b'})
+print (Template.render {label:'a'} tpl)   # forward form (canonical)
+print (tpl Template.render {label:'b'})   # piping — also correct
 ```
 
 ---

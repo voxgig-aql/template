@@ -1,6 +1,6 @@
 ---
 name: template-aql
-description: Use when writing or editing AQL code that calls the Template library — Template.compile / Template.render / Template.engines, the Compiled type, or any file that does `import "./template.aql"`. Renders mustache / handlebars / liquid / jinja templates against a data context through one common, sandboxed interface. Provides the exact AQL calling convention (which is not C/Python/JS), the per-engine feature set, verified copy-paste idioms, and fixes for the mistakes agents most often make (foreign call syntax like `tpl.render(ctx)`, verb-first order, bare `e get code` instead of `e get "code"`, assuming `{{x}}` is raw, expecting parent-context fallback in mustache sections).
+description: Use when writing or editing AQL code that calls the Template library — Template.compile / Template.render / Template.engines, the Compiled type, or any file that does `import "./template.aql"`. Renders mustache / handlebars / liquid / jinja templates against a data context through one common, sandboxed interface. Provides the exact AQL calling convention (which is not C/Python/JS — the `Compiled` receiver goes LAST: `Template.render data tpl`, not `Template.render tpl data`), the per-engine feature set, verified copy-paste idioms, and fixes for the mistakes agents most often make (foreign call syntax like `tpl.render(ctx)`, putting the receiver first in forward position, bare `e get code` instead of `e get "code"`, assuming `{{x}}` is raw, expecting parent-context fallback in mustache sections).
 ---
 
 # Calling the Template library (AQL)
@@ -26,28 +26,43 @@ import "./template.aql"
 
 ## The one calling rule
 
-AQL has no `f(a, b)` and no `obj.method(a)`. A call is **receiver-first,
-arguments forward**:
+AQL has no `f(a, b)` and no `obj.method(a)`. A call is a **verb with its
+arguments forward** — `Verb arg1 arg2` — and a value sitting to the **left**
+of the verb is piped into the verb's **last** parameter.
 
-```
-receiver Template.verb arg
-```
-
-Receiver/data first, then the verb, then any extra args forward. Group the
-call in parens to use its result as a value.
+The public `Template` words put the **receiver (the `Compiled` template)
+LAST**: `render`'s signature is `[cdata:Any c:Compiled]` — **data first,
+compiled last**. Because the receiver is the last parameter, two spellings
+both bind correctly:
 
 ```aql
-def tpl ({engine:'mustache' source:'Hi {{name}}!'} Template.compile)
+def tpl (Template.compile {engine:'mustache' source:'Hi {{name}}!'})
+
+# forward form (canonical): data forward, compiled LAST
+print (Template.render {name:'Ada'} tpl)   # => Hi Ada!
+
+# piping: the compiled template flows in from the LEFT
 print (tpl Template.render {name:'Ada'})   # => Hi Ada!
 ```
+
+Only putting the receiver **first in forward position** misbinds — the data
+lands in the receiver slot and render fails a type match:
+
+```aql
+print (Template.render tpl {name:'Ada'})   # ✗ WRONG: tpl→cdata, map→c
+```
+
+`compile` takes a single `Options` map (it is a constructor), so
+`Template.compile {…}` and `{…} Template.compile` are equivalent. Group any
+call in parens to use its result as a value.
 
 ## API
 
 | Call | Returns | Notes |
 |------|---------|-------|
-| `{engine:String, source:String} Template.compile` | `Compiled` | Parse + compile once. Bad args raise `bad_input`; an unimplemented engine raises `unknown_engine`. |
-| `compiled Template.render context` | `String` | Render a compiled template against a context (any Map/value). |
-| `{engine, source, context} Template.render` | `String` | One-shot: compile + render. |
+| `Template.compile {engine:String, source:String}` | `Compiled` | Parse + compile once (single `Options` arg; `{…} Template.compile` is equivalent). Bad args raise `bad_input`; an unimplemented engine raises `unknown_engine`. |
+| `Template.render context compiled` | `String` | Render a compiled template against a context (any Map/value). Receiver LAST; piping `compiled Template.render context` is equivalent. |
+| `Template.render {engine, source, context}` | `String` | One-shot: compile + render (single `Options` arg). |
 | `Template.engines` | `List` | `['mustache' 'handlebars' 'liquid' 'jinja']`. |
 
 `Compiled` has read-only fields `engine` / `program`; build only via
@@ -95,10 +110,10 @@ import "./template.aql"
 print ({engine:'mustache' source:'Hi {{name}}!' context:{name:'Ada'}} Template.render)
 # => Hi Ada!
 
-# compile once, render many
-def li ({engine:'mustache' source:'<li>{{label}}</li>'} Template.compile)
-print (li Template.render {label:'a'})
-print (li Template.render {label:'b'})
+# compile once, render many — data first, compiled LAST
+def li (Template.compile {engine:'mustache' source:'<li>{{label}}</li>'})
+print (Template.render {label:'a'} li)     # forward form (canonical)
+print (li Template.render {label:'b'})     # piping — also correct
 
 # handlebars block helpers
 print ({engine:'handlebars' source:'{{#each xs}}{{@index}}:{{this}} {{/each}}' context:{xs:['a' 'b']}} Template.render)
@@ -120,13 +135,35 @@ def out (do [{engine:'erb' source:'x' context:{}} Template.render] error [ get "
 
 | ✗ Don't | ✓ Do | Why |
 |---------|------|-----|
-| `Template.render(tpl, ctx)` / `tpl.render(ctx)` | `(tpl Template.render ctx)` | AQL has no call/method syntax. |
-| `Template.render tpl ctx` (verb-first) | `tpl Template.render ctx` | Receiver comes first. |
+| `Template.render(tpl, ctx)` / `tpl.render(ctx)` | `(Template.render ctx tpl)` | AQL has no call/method syntax. |
+| `Template.render tpl ctx` (receiver first in forward position) | `Template.render ctx tpl` or `tpl Template.render ctx` | The `Compiled` receiver binds LAST — put it last, or pipe it in from the left. |
 | `e get code` | `e get "code"` | `get` evaluates its key; use a quoted String. |
 | treat `{{x}}` as raw (mustache/handlebars) | `{{{x}}}` / `{{& x}}` for raw | `{{x}}` is HTML-escaped there. |
 | rely on parent context in a mustache section | pass needed fields into the item | no parent-context fallback. |
 | `make Compiled {…}` | `{engine, source} Template.compile` | Construct only via `Template.compile`. |
 | `import "aql:parse"` in your script | nothing | the library imports its own deps. |
+
+## AQL semantics worth knowing (by design)
+
+These are intentional AQL behaviours that bite when driving this library:
+
+- **`None` interpolation renders `None`.** In a host string, `${x}` where
+  `x` is `None` prints the literal `None` (human-readable), not empty and
+  not JSON `null`. (Inside a template, a *missing* lookup still renders
+  empty — `tpl_str` maps `None → ""`.) For JSON semantics use `jsonify`
+  (the `aql:struct` module), not string interpolation.
+- **`eq` is identity, `deq` is structural.** `[1 2] eq [1 2]` is `false`;
+  `[1 2] deq [1 2]` is `true`. Rendered output is a String, so compare it
+  with `eq`; compare Lists/Maps (e.g. `Template.engines`) with `deq`.
+- **Maps/Lists are immutable.** `set` / `push` return a **new** value and
+  leave the original unchanged (they do not mutate in place and do not
+  error). Use `flex` for a genuinely mutable Map.
+- **`each` is a MAP** — it yields one value per element (`[1 2 3] each …`
+  → a new List). Use `for` for pure side effects.
+- **Integer overflow is fail-loud.** Arithmetic is 63-bit and raises
+  `integer_overflow` past the range, by design — it never wraps.
+- **Keys evaluate now.** Bare `e get code` is "undefined word: code";
+  write `e get "code"` (quoted) or `e.code`.
 
 If the full repo is available, `AGENTS.md`, `api.json` (machine-readable
 signatures), and `docs/reference.md` have the complete guide;
