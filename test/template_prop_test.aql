@@ -105,12 +105,16 @@ Test.check-prop "compile-equals-oneshot"
 
 print ("---")
 def all-results (Test.results)
+# The each body's result (0) lives INSIDE each `if` branch, not as a
+# trailing statement after the `if`. A discarded dynamic `if` result
+# followed by a trailing literal (`if … 0`) trips aql's forward-stack-drift
+# soundness guard and refuses to bytecode-compile; making the `if` the
+# body's final result statement keeps the whole suite fully compiled.
 def _print (all-results each [
   var [[r]
     def nm (r get "name")
     def ok (r get "ok")
-    if ok [ print (`  pass: ${nm}`) ] [ print (`  FAIL: ${nm}  failing-input=${(r get "failing-input")}`) ]
-    0
+    if ok [ print (`  pass: ${nm}`)  0 ] [ print (`  FAIL: ${nm}  failing-input=${(r get "failing-input")}`)  0 ]
   ]
 ])
 print ("---")
