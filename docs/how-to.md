@@ -24,17 +24,17 @@ links into the [Explanation](explanation.md); for exact signatures, the
 
 The module is written in AQL, which has no tagged release, so build the
 interpreter from source at the commit this library pins
-(`b849948`, latest `main`):
+(`6185620`, latest `main`):
 
 ```bash
 mkdir -p /tmp/aql && curl -fsSL \
-  "https://codeload.github.com/aql-lang/aql/tar.gz/b849948a596ddba5c72faf7fcd7a57b585daa9f0" \
+  "https://codeload.github.com/aql-lang/aql/tar.gz/618562025d9e0154107306927911a8b1b046333c" \
   | tar -xz -C /tmp/aql --strip-components=1
 ( cd /tmp/aql/cmd/go && GOFLAGS=-mod=mod go build -o "$HOME/.local/bin/aql" ./aql )
 ```
 
 (The codeload tarball works where the `aql-lang/aql` git remote is
-egress-blocked; a `git clone` + `git checkout b849948…` works too.) Make
+egress-blocked; a `git clone` + `git checkout 6185620…` works too.) Make
 sure `$HOME/.local/bin` is on your `PATH`, then check it:
 
 ```bash
@@ -48,7 +48,7 @@ resolves):
 aql test/template_smoke_test.aql
 ```
 
-This module is verified against aql commit `b849948`. In Claude Code web
+This module is verified against aql commit `6185620`. In Claude Code web
 sessions the SessionStart hook builds it for you.
 
 ---

@@ -83,7 +83,7 @@ test/template_*_test|spec.aql   mustache unit/prop suites + smoke (the spine)
 test/handlebars_unit_test.aql   handlebars engine unit tests
 test/liquid_unit_test.aql       liquid engine unit tests
 test/jinja_unit_test.aql        jinja engine unit tests
-dx-report.md                    developer-experience notes (pin: aql @ b849948)
+dx-report.md                    developer-experience notes (pin: aql @ 6185620)
 ```
 
 ## Running it
@@ -92,7 +92,7 @@ Build the `aql` interpreter from source (latest `main`), then run any
 script or test:
 
 ```bash
-# build aql (the template pins aql-lang/aql @ b849948…)
+# build aql (the template pins aql-lang/aql @ 6185620…)
 mkdir -p /tmp/aql && curl -fsSL \
   "https://codeload.github.com/aql-lang/aql/tar.gz/main" \
   | tar -xz -C /tmp/aql --strip-components=1
@@ -131,7 +131,7 @@ The library is complete: `template.aql` (all four engines), the eight test
 suites, the [Diátaxis docs](docs/), the agent guides
 ([AGENTS.md](AGENTS.md) / [CLAUDE.md](CLAUDE.md) / the `template-aql` skill
 + plugin / [api.json](api.json)), and the CI workflow ([`ci/test.yml`](ci/test.yml))
-are all current against aql `b849948`. Known scope limits (partials,
+are all current against aql `6185620`. Known scope limits (partials,
 inheritance, custom helpers/filters, parent-context fallback in
 mustache/handlebars sections) are listed in [AGENTS.md](AGENTS.md); the
 interpret/check/compile surface status is in [dx-report.md](dx-report.md).

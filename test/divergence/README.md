@@ -24,7 +24,7 @@ test/divergence/run.sh
 ```
 
 `run.sh` builds its own aql at a ref pinned in the script (the same
-`b849948` the library pins; pinning it here keeps the harness
+`6185620` the library pins; pinning it here keeps the harness
 self-contained, so it never depends on whatever aql is on `PATH`), then
 prints a per-suite matrix:
 

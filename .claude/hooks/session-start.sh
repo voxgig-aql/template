@@ -20,7 +20,7 @@ log() { echo "[session-start] $*" >&2; }
 # fails if they drift). The canonical workflow currently lives in ci/test.yml
 # pending promotion to .github/workflows/ (see ci/README.md). Full 40-char
 # commit so the build is reproducible.
-AQL_REF=b849948a596ddba5c72faf7fcd7a57b585daa9f0
+AQL_REF=618562025d9e0154107306927911a8b1b046333c
 BIN_DIR="$HOME/.local/bin"
 AQL="$BIN_DIR/aql"
 
