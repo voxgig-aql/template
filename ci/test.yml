@@ -15,6 +15,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * *'
 
 jobs:
   test:
@@ -28,10 +30,11 @@ jobs:
         with:
           go-version: '1.24'
 
-      # Single source of truth for the pinned aql commit.
-      - name: Read pinned aql ref
+      # Track aql-lang/aql main: resolve its current HEAD once, reuse across
+      # jobs. A new HEAD yields a new cache key and forces a rebuild.
+      - name: Resolve aql main HEAD
         id: ref
-        run: echo "aql_ref=$(cat ci/aql-ref)" >> "$GITHUB_OUTPUT"
+        run: echo "aql_ref=$(git ls-remote https://github.com/aql-lang/aql.git main | cut -f1)" >> "$GITHUB_OUTPUT"
 
       # The compiled binary only depends on the ref (and the OS), so a cache
       # hit lets ci/build-aql.sh skip the clone + build entirely.
@@ -44,6 +47,8 @@ jobs:
       # Builds aql at ci/aql-ref (cache miss only), runs every suite, and ends
       # with an advisory `aql check` (non-gating).
       - name: Build aql and run the suites
+        env:
+          AQL_REF: ${{ steps.ref.outputs.aql_ref }}
         run: ci/run-tests.sh
 
   # Gating three-surface guard: every suite must interpret, `aql check` with
