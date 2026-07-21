@@ -11,7 +11,7 @@ by the `engine` field. Every render is **sandboxed** (parsed via
 `aql:parse`, compiled to custom `tpl_*` words, run through `aql:vm` with
 all capabilities — network/fileops/process/env/sqlite — uninstalled), so a
 template can never do I/O or escape. Public surface = the `Template`
-namespace + the `Compiled` type. Verified against `aql @ b849948`.
+namespace + the `Compiled` type. Verified against `aql @ 6185620`.
 
 ## Import
 

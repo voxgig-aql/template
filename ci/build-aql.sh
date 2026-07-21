@@ -30,7 +30,7 @@ curl -fsSL "https://codeload.github.com/aql-lang/aql/tar.gz/$AQL_REF" \
   | tar -xz -C "$src" --strip-components=1 \
   || { echo "error: could not fetch aql source." >&2; exit 1; }
 mkdir -p "$(dirname "$BIN")"
-( cd "$src/cmd/go" && GOFLAGS=-mod=mod go build \
+( cd "$src/cmd/go" && GOWORK=off GOFLAGS=-mod=mod go build \
     -ldflags "-X github.com/aql-lang/aql/cmd/go.Version=$AQL_REF" \
     -o "$BIN" ./aql ) \
   || { echo "error: aql build failed." >&2; exit 1; }

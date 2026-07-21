@@ -1,7 +1,7 @@
 {
   "name": "template",
   "version": "0.1.0",
-  "aql_ref": "b849948",
+  "aql_ref": "6185620",
   "description": "Sandboxed templating languages for AQL: render text templates against a data context through one common interface, exposed as the single `Template` namespace. Four engines are implemented on the shared parse->compile->sandbox pipeline: mustache, handlebars, liquid, jinja.",
   "conventions": {
     "import": "import \"./template.aql\"  — the library imports its own aql:* deps (aql:parse, aql:parselang, aql:string-util, aql:vm); callers need not",

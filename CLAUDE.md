@@ -38,7 +38,7 @@ Each engine follows one pipeline (see the header of `template.aql`):
   the codeload tarball (the `aql-lang/aql` git remote is egress-blocked
   behind the agent proxy) and falls back to `git clone`. Locally, build
   once from source — see [docs/how-to.md](docs/how-to.md#install-and-run-aql).
-- The pinned aql commit is **latest main** (`b849948…`), single-sourced in
+- The pinned aql commit is **latest main** (`6185620…`), single-sourced in
   the SessionStart hook's `AQL_REF`. Several fixes this module relies on
   (notably `get` evaluating a dynamic key argument) landed after the older
   `407feda` pin the template was forked from.

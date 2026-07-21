@@ -298,7 +298,7 @@ Parse.rule mustache-grammar val {
   close: [ {s:'#ZZ'} {} ]
 } end
 
-Parse.register mustache mustache-grammar end
+def mustache (Parse.parser mustache-grammar) end
 
 # Lex a source string into its token list (re-entrant via span slicing).
 def lex-mustache fn [ [src:String] [List] [
@@ -566,7 +566,7 @@ Parse.matcher liquid-grammar lex 5 ([s:String] => [
     {src: txt tin:'#TX' val:'text'} ]]
 ]) end
 Parse.rule liquid-grammar val {open:[{s:'#TX' p:'val'} {}] close:[{s:'#ZZ'} {}]} end
-Parse.register liquid liquid-grammar end
+def liquid (Parse.parser liquid-grammar) end
 def lex-liquid fn [ [src:String] [List] [
   def st (liquid-acc size)  def _ (parse liquid src)  slice st (liquid-acc size) liquid-acc
 ] ]
@@ -603,7 +603,7 @@ Parse.matcher jinja-grammar lex 5 ([s:String] => [
     {src: txt tin:'#TX' val:'text'} ]]]
 ]) end
 Parse.rule jinja-grammar val {open:[{s:'#TX' p:'val'} {}] close:[{s:'#ZZ'} {}]} end
-Parse.register jinja jinja-grammar end
+def jinja (Parse.parser jinja-grammar) end
 def lex-jinja fn [ [src:String] [List] [
   def st (jinja-acc size)  def _ (parse jinja src)  slice st (jinja-acc size) jinja-acc
 ] ]
