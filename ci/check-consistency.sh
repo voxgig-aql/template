@@ -14,7 +14,6 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 cd "$REPO"
-ref="$(tr -d '[:space:]' < ci/aql-ref)"
 fail=0
 
 # 1. SKILL.md copies in sync ------------------------------------------------
@@ -39,27 +38,5 @@ for j in .claude-plugin/marketplace.json \
   fi
 done
 
-# 3. pinned aql ref consistent vs ci/aql-ref --------------------------------
-# (ci/test.yml reads ci/aql-ref directly, so it can't drift and isn't checked.)
-check_ref() { # <found> <file>
-  if [ "$1" != "$ref" ]; then
-    echo "::error file=$2::pinned ref '$1' != ci/aql-ref '$ref'"
-    fail=1
-  else
-    echo "ok: $2 ref matches"
-  fi
-}
-hook_ref=$(grep -oE 'AQL_REF=[0-9a-f]{7,40}' .claude/hooks/session-start.sh | head -1 | cut -d= -f2)
-check_ref "$hook_ref" .claude/hooks/session-start.sh
-div_ref=$(grep -oE 'AQL_BYTECODE_REF=[0-9a-f]{7,40}' test/divergence/run.sh | head -1 | cut -d= -f2)
-check_ref "$div_ref" test/divergence/run.sh
-api_ref=$(python3 -c "import json;print(json.load(open('api.json'))['aql_ref'])")
-if [ "${ref:0:${#api_ref}}" = "$api_ref" ]; then
-  echo "ok: api.json aql_ref prefix matches"
-else
-  echo "::error file=api.json::aql_ref='$api_ref' is not a prefix of ci/aql-ref '$ref'"
-  fail=1
-fi
-
-[ "$fail" = 0 ] && echo "[ci] consistency OK (ref $ref)" || echo "[ci] consistency FAILED"
+[ "$fail" = 0 ] && echo "[ci] consistency OK" || echo "[ci] consistency FAILED"
 exit $fail

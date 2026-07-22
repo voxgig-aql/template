@@ -1,16 +1,21 @@
 {
   "name": "template",
   "version": "0.1.0",
-  "aql_ref": "6185620",
+  "aql_ref": "main",
   "description": "Sandboxed templating languages for AQL: render text templates against a data context through one common interface, exposed as the single `Template` namespace. Four engines are implemented on the shared parse->compile->sandbox pipeline: mustache, handlebars, liquid, jinja.",
   "conventions": {
-    "import": "import \"./template.aql\"  — the library imports its own aql:* deps (aql:parse, aql:parselang, aql:string-util, aql:vm); callers need not",
+    "import": "import \"./template.aql\"  \u2014 the library imports its own aql:* deps (aql:parse, aql:parselang, aql:string-util, aql:vm); callers need not",
     "call": "receiver-first, arguments forward (preferred): `receiver Template.verb arg...`. Group in parens to use the result as a value, e.g. `(tpl Template.render ctx)`.",
     "construct": "build compiled templates ONLY via Template.compile; treat Compiled fields as read-only",
     "pipeline": "each render is parse (aql:parse grammar) -> compile (to an AQL program of custom tpl_* words) -> run (aql:vm sub-engine under a totally restricted policy with every capability scope uninstalled), so a template can never do I/O or escape the sandbox",
     "import_resolution": "relative to the working directory the script is run from, not the importing file",
-    "external_deps": ["aql:parse", "aql:parselang", "aql:string-util", "aql:vm"],
-    "errors": "failures raise coded errors caught with `do [...] error [...]`; read e.code / e.message via `e get \"code\"` (a QUOTED string key — on this build `get` evaluates its key argument). Codes: bad_input (compile/render args missing or wrong type), unknown_engine (engine not implemented, e.g. 'erb'), template_syntax (malformed/unbalanced template; a truly unterminated tag surfaces as parse_syntax_error from the parser).",
+    "external_deps": [
+      "aql:parse",
+      "aql:parselang",
+      "aql:string-util",
+      "aql:vm"
+    ],
+    "errors": "failures raise coded errors caught with `do [...] error [...]`; read e.code / e.message via `e get \"code\"` (a QUOTED string key \u2014 on this build `get` evaluates its key argument). Codes: bad_input (compile/render args missing or wrong type), unknown_engine (engine not implemented, e.g. 'erb'), template_syntax (malformed/unbalanced template; a truly unterminated tag surfaces as parse_syntax_error from the parser).",
     "escaping": "mustache and handlebars HTML-escape {{var}} (& < > \"), with {{{var}}} / {{& var}} raw; liquid and jinja output is raw by default (use the `escape` filter)."
   },
   "engines": {
@@ -22,19 +27,57 @@
     "not_implemented": "partials/includes, template inheritance, custom helpers/filters, set-delimiters, lambdas, parent-context fallback in mustache/handlebars sections"
   },
   "modules": {
-    "template.aql": { "kind": "templating engine", "namespaces": ["Template"] }
+    "template.aql": {
+      "kind": "templating engine",
+      "namespaces": [
+        "Template"
+      ]
+    }
   },
   "types": {
-    "Compiled": { "kind": "class", "fields": ["engine", "program"], "note": "construct only via Template.compile; fields are read-only. `engine` is the engine name; `program` is the generated AQL source run in the sandbox." }
+    "Compiled": {
+      "kind": "class",
+      "fields": [
+        "engine",
+        "program"
+      ],
+      "note": "construct only via Template.compile; fields are read-only. `engine` is the engine name; `program` is the generated AQL source run in the sandbox."
+    }
   },
   "word_specs": {
     "template": {
-      "compile": { "call": "{engine:String, source:String} Template.compile", "args": ["opts:Map{engine:String,source:String}"], "returns": "Compiled", "note": "Parse + compile a template once. Raises bad_input on missing/mistyped engine or source; unknown_engine for an unimplemented engine." },
-      "render":  { "call": "compiled Template.render context  |  {engine, source, context} Template.render", "args": ["compiled:Compiled, context:Any", "OR opts:Map{engine,source,context}"], "returns": "String", "note": "Two forms: render a Compiled against a context, or the one-shot options map (compile + render). Runs in the sandbox; raises template_syntax on a malformed template." },
-      "engines": { "call": "Template.engines", "args": [], "returns": "List", "note": "Engines this build implements: ['mustache']." }
+      "compile": {
+        "call": "{engine:String, source:String} Template.compile",
+        "args": [
+          "opts:Map{engine:String,source:String}"
+        ],
+        "returns": "Compiled",
+        "note": "Parse + compile a template once. Raises bad_input on missing/mistyped engine or source; unknown_engine for an unimplemented engine."
+      },
+      "render": {
+        "call": "compiled Template.render context  |  {engine, source, context} Template.render",
+        "args": [
+          "compiled:Compiled, context:Any",
+          "OR opts:Map{engine,source,context}"
+        ],
+        "returns": "String",
+        "note": "Two forms: render a Compiled against a context, or the one-shot options map (compile + render). Runs in the sandbox; raises template_syntax on a malformed template."
+      },
+      "engines": {
+        "call": "Template.engines",
+        "args": [],
+        "returns": "List",
+        "note": "Engines this build implements: ['mustache']."
+      }
     }
   },
   "namespaces": {
-    "Template": { "kind": "templating", "module": "template.aql", "specs": ["template"] }
+    "Template": {
+      "kind": "templating",
+      "module": "template.aql",
+      "specs": [
+        "template"
+      ]
+    }
   }
 }

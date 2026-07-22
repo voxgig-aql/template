@@ -10,15 +10,26 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AQL_REF="$(tr -d '[:space:]' < "$HERE/aql-ref")"
+# Track aql-lang/aql MAIN: resolve its current HEAD (env override lets CI resolve
+# it once and pass it in). No pinned commit.
+AQL_REF="${AQL_REF:-$(git ls-remote https://github.com/aql-lang/aql.git main | cut -f1)}"
 BIN="$HOME/.local/bin/aql"
 
-# Already on PATH at the right ref? Reuse it.
-if command -v aql >/dev/null 2>&1; then
-  echo "$(command -v aql)"
+at_main() { [ -n "$AQL_REF" ] && [ "$("$1" -version 2>/dev/null | awk '{print $NF}')" = "$AQL_REF" ]; }
+
+if [ -z "$AQL_REF" ]; then
+  # Offline: reuse whatever aql is present, else fail.
+  command -v aql >/dev/null 2>&1 && { command -v aql; exit 0; }
+  [ -x "$BIN" ] && { echo "$BIN"; exit 0; }
+  echo "error: could not resolve aql main HEAD (network?) and no aql present." >&2; exit 1
+fi
+
+# Already built at main HEAD? Reuse it.
+if command -v aql >/dev/null 2>&1 && at_main aql; then
+  command -v aql
   exit 0
 fi
-if [ -x "$BIN" ]; then
+if [ -x "$BIN" ] && at_main "$BIN"; then
   echo "$BIN"
   exit 0
 fi
